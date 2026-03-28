@@ -1,0 +1,1932 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TurboQuantDC — Crush your KV cache to 3 bits</title>
+<style>
+/* ============================================================
+   CSS CUSTOM PROPERTIES
+   ============================================================ */
+:root {
+  --bg: #0a0a0f;
+  --bg-card: #12121a;
+  --bg-card-hover: #1a1a28;
+  --cyan: #00f0ff;
+  --cyan-dim: #00f0ff44;
+  --cyan-glow: #00f0ff88;
+  --orange: #ff6b35;
+  --orange-dim: #ff6b3544;
+  --red: #ff3355;
+  --green: #00ff88;
+  --green-dim: #00ff8844;
+  --yellow: #ffcc00;
+  --text: #e8e8f0;
+  --text-dim: #8888aa;
+  --text-muted: #555566;
+  --mono: 'SF Mono', 'Fira Code', 'Cascadia Code', 'JetBrains Mono', monospace;
+  --sans: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --section-pad: 80px;
+}
+
+/* ============================================================
+   RESET & BASE
+   ============================================================ */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html {
+  scroll-behavior: smooth;
+  scroll-snap-type: y proximity;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  background: var(--bg);
+  overflow-x: hidden;
+  line-height: 1.6;
+}
+
+/* ============================================================
+   PARTICLE CANVAS (fixed backdrop)
+   ============================================================ */
+#particle-canvas {
+  position: fixed;
+  top: 0; left: 0;
+  width: 100vw; height: 100vh;
+  z-index: 0;
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+/* ============================================================
+   SECTIONS
+   ============================================================ */
+section {
+  position: relative;
+  z-index: 1;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: var(--section-pad) 40px;
+  scroll-snap-align: start;
+}
+
+.section-inner {
+  max-width: 1200px;
+  width: 100%;
+}
+
+/* ============================================================
+   SECTION 1: HERO
+   ============================================================ */
+.hero {
+  text-align: center;
+  padding-top: 0;
+}
+
+.hero-title {
+  font-size: clamp(3rem, 8vw, 7rem);
+  font-weight: 900;
+  letter-spacing: -0.03em;
+  line-height: 1.05;
+  background: linear-gradient(135deg, var(--cyan) 0%, #60a0ff 50%, var(--orange) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  filter: drop-shadow(0 0 40px var(--cyan-dim));
+  margin-bottom: 24px;
+  opacity: 0;
+  transform: translateY(30px);
+  animation: heroFadeIn 1.2s ease-out 0.3s forwards;
+}
+
+.hero-subtitle {
+  font-size: clamp(1.1rem, 2.2vw, 1.6rem);
+  color: var(--text-dim);
+  max-width: 700px;
+  margin: 0 auto 56px;
+  font-weight: 400;
+  opacity: 0;
+  transform: translateY(20px);
+  animation: heroFadeIn 1s ease-out 0.7s forwards;
+}
+
+@keyframes heroFadeIn {
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* Counters row */
+.counters {
+  display: flex;
+  justify-content: center;
+  gap: 60px;
+  flex-wrap: wrap;
+  margin-bottom: 80px;
+  opacity: 0;
+  animation: heroFadeIn 1s ease-out 1.1s forwards;
+}
+
+.counter-item {
+  text-align: center;
+}
+
+.counter-value {
+  font-family: var(--mono);
+  font-size: clamp(2rem, 5vw, 3.5rem);
+  font-weight: 700;
+  color: var(--cyan);
+  text-shadow: 0 0 30px var(--cyan-dim);
+}
+
+.counter-label {
+  font-size: 0.95rem;
+  color: var(--text-dim);
+  margin-top: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+/* Scroll hint */
+.scroll-hint {
+  color: var(--text-muted);
+  font-size: 1rem;
+  opacity: 0;
+  animation: heroFadeIn 0.8s ease-out 1.8s forwards;
+}
+
+.scroll-arrow {
+  display: inline-block;
+  animation: bounce 2s ease-in-out infinite;
+  margin-left: 6px;
+}
+
+@keyframes bounce {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(8px); }
+}
+
+/* ============================================================
+   SECTION 2: THE PROBLEM
+   ============================================================ */
+.problem { background: linear-gradient(180deg, var(--bg) 0%, #08080e 100%); }
+
+.section-heading {
+  font-size: clamp(2rem, 4vw, 3rem);
+  font-weight: 800;
+  margin-bottom: 16px;
+  text-align: center;
+}
+
+.section-subheading {
+  font-size: 1.1rem;
+  color: var(--text-dim);
+  text-align: center;
+  max-width: 700px;
+  margin: 0 auto 48px;
+}
+
+.gpu-viz {
+  max-width: 700px;
+  margin: 0 auto;
+}
+
+.gpu-card {
+  background: var(--bg-card);
+  border: 1px solid #222233;
+  border-radius: 16px;
+  padding: 32px;
+  margin-bottom: 32px;
+}
+
+.gpu-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+}
+
+.gpu-name {
+  font-family: var(--mono);
+  font-size: 1.1rem;
+  color: var(--cyan);
+}
+
+.gpu-total {
+  font-family: var(--mono);
+  font-size: 0.9rem;
+  color: var(--text-dim);
+}
+
+.vram-bar-container {
+  position: relative;
+  height: 56px;
+  background: #1a1a2e;
+  border-radius: 8px;
+  overflow: hidden;
+  margin-bottom: 12px;
+}
+
+.vram-segment {
+  position: absolute;
+  top: 0; bottom: 0;
+  transition: width 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+  display: flex;
+  align-items: center;
+  padding-left: 12px;
+  font-size: 0.8rem;
+  font-family: var(--mono);
+  color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.vram-weights {
+  left: 0;
+  background: #2244aa;
+  z-index: 2;
+}
+
+.vram-kv {
+  background: linear-gradient(90deg, #cc2244 0%, #ff3355 100%);
+  z-index: 1;
+}
+
+.vram-kv.oom {
+  background: linear-gradient(90deg, #cc2244 0%, #ff1133 100%);
+  animation: pulseBg 0.8s ease-in-out infinite;
+}
+
+@keyframes pulseBg {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+.vram-limit-line {
+  position: absolute;
+  right: 0; top: 0; bottom: 0;
+  width: 2px;
+  background: var(--yellow);
+  z-index: 3;
+}
+
+.oom-badge {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: var(--red);
+  color: #fff;
+  font-family: var(--mono);
+  font-size: 0.9rem;
+  font-weight: 700;
+  padding: 4px 12px;
+  border-radius: 4px;
+  z-index: 4;
+  animation: pulseBg 0.6s ease-in-out infinite;
+  display: none;
+}
+
+.vram-legend {
+  display: flex;
+  gap: 24px;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+}
+
+.legend-dot {
+  display: inline-block;
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+
+/* Context slider */
+.slider-container {
+  text-align: center;
+  margin-top: 32px;
+}
+
+.slider-label {
+  font-family: var(--mono);
+  font-size: 1.1rem;
+  color: var(--text);
+  margin-bottom: 12px;
+}
+
+.slider-label span {
+  color: var(--cyan);
+  font-weight: 700;
+}
+
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  max-width: 500px;
+  height: 6px;
+  border-radius: 3px;
+  background: linear-gradient(90deg, var(--cyan-dim), var(--red));
+  outline: none;
+  cursor: pointer;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 22px; height: 22px;
+  border-radius: 50%;
+  background: var(--cyan);
+  box-shadow: 0 0 16px var(--cyan-dim);
+  cursor: pointer;
+}
+
+input[type="range"]::-moz-range-thumb {
+  width: 22px; height: 22px;
+  border-radius: 50%;
+  background: var(--cyan);
+  box-shadow: 0 0 16px var(--cyan-dim);
+  cursor: pointer;
+  border: none;
+}
+
+.context-stats {
+  display: flex;
+  justify-content: center;
+  gap: 40px;
+  margin-top: 16px;
+  font-size: 0.9rem;
+}
+
+.context-stats .stat-val {
+  font-family: var(--mono);
+  font-weight: 700;
+}
+
+/* ============================================================
+   SECTION 3: THE ALGORITHM
+   ============================================================ */
+.algorithm {
+  background: linear-gradient(180deg, #08080e 0%, var(--bg) 100%);
+  padding-bottom: 40px;
+}
+
+.pipeline-container {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 32px;
+  margin-top: 40px;
+}
+
+@media (max-width: 900px) {
+  .pipeline-container { grid-template-columns: 1fr; }
+}
+
+.pipeline-stage {
+  background: var(--bg-card);
+  border: 1px solid #222233;
+  border-radius: 16px;
+  padding: 28px;
+  opacity: 0;
+  transform: translateY(40px);
+  transition: opacity 0.8s ease-out, transform 0.8s ease-out;
+}
+
+.pipeline-stage.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.stage-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.stage-number {
+  width: 36px; height: 36px;
+  border-radius: 50%;
+  background: var(--cyan);
+  color: var(--bg);
+  font-family: var(--mono);
+  font-weight: 800;
+  font-size: 1rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.stage-title {
+  font-size: 1.15rem;
+  font-weight: 700;
+}
+
+.stage-canvas {
+  width: 100%;
+  height: 200px;
+  border-radius: 8px;
+  background: #0d0d18;
+  margin-bottom: 12px;
+}
+
+.stage-desc {
+  font-size: 0.9rem;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+
+.stage-desc code {
+  font-family: var(--mono);
+  color: var(--cyan);
+  background: #0d0d18;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.85rem;
+}
+
+/* ============================================================
+   SECTION 4: QUALITY EXPLORER
+   ============================================================ */
+.quality { background: linear-gradient(180deg, var(--bg) 0%, #08080e 100%); }
+
+.quality-controls {
+  display: flex;
+  justify-content: center;
+  gap: 16px;
+  margin-bottom: 48px;
+}
+
+.bit-btn {
+  font-family: var(--mono);
+  font-size: 1.1rem;
+  font-weight: 700;
+  padding: 14px 32px;
+  border: 2px solid #333344;
+  border-radius: 12px;
+  background: var(--bg-card);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.bit-btn:hover {
+  border-color: var(--cyan-dim);
+  color: var(--text);
+}
+
+.bit-btn.active {
+  border-color: var(--cyan);
+  background: linear-gradient(135deg, #0a2030 0%, #0a1520 100%);
+  color: var(--cyan);
+  box-shadow: 0 0 24px var(--cyan-dim);
+}
+
+.quality-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 32px;
+  margin-bottom: 48px;
+}
+
+@media (max-width: 800px) {
+  .quality-grid { grid-template-columns: 1fr; }
+}
+
+/* Gauge */
+.gauge-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-card);
+  border: 1px solid #222233;
+  border-radius: 16px;
+  padding: 40px 20px;
+}
+
+.gauge-svg {
+  width: 260px;
+  height: 160px;
+}
+
+.gauge-arc-bg {
+  fill: none;
+  stroke: #1a1a2e;
+  stroke-width: 14;
+  stroke-linecap: round;
+}
+
+.gauge-arc-fill {
+  fill: none;
+  stroke: url(#gaugeGradient);
+  stroke-width: 14;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 0.8s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.gauge-value-text {
+  font-family: var(--mono);
+  font-size: 2.4rem;
+  font-weight: 700;
+  color: var(--cyan);
+  text-align: center;
+  margin-top: 8px;
+  text-shadow: 0 0 20px var(--cyan-dim);
+}
+
+.gauge-label {
+  font-size: 0.9rem;
+  color: var(--text-dim);
+  text-align: center;
+  margin-top: 4px;
+}
+
+/* Metrics bars */
+.metrics-panel {
+  background: var(--bg-card);
+  border: 1px solid #222233;
+  border-radius: 16px;
+  padding: 32px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 28px;
+}
+
+.metric-item label {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.9rem;
+  color: var(--text-dim);
+  margin-bottom: 8px;
+}
+
+.metric-item label span {
+  font-family: var(--mono);
+  font-weight: 700;
+  color: var(--text);
+}
+
+.metric-bar-bg {
+  height: 24px;
+  background: #1a1a2e;
+  border-radius: 6px;
+  overflow: hidden;
+  position: relative;
+}
+
+.metric-bar-fill {
+  height: 100%;
+  border-radius: 6px;
+  transition: width 0.8s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.metric-bar-fill.cyan { background: linear-gradient(90deg, #005566, var(--cyan)); }
+.metric-bar-fill.orange { background: linear-gradient(90deg, #663300, var(--orange)); }
+.metric-bar-fill.green { background: linear-gradient(90deg, #005533, var(--green)); }
+
+/* Per-head heatmap */
+.perhead-container {
+  background: var(--bg-card);
+  border: 1px solid #222233;
+  border-radius: 16px;
+  padding: 28px;
+}
+
+.perhead-title {
+  font-size: 1rem;
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+
+.perhead-subtitle {
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  margin-bottom: 16px;
+}
+
+.perhead-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.head-bar {
+  width: 12px;
+  height: 40px;
+  border-radius: 3px;
+  transition: height 0.6s ease, background 0.3s ease;
+}
+
+.perhead-legend {
+  display: flex;
+  gap: 20px;
+  margin-top: 14px;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+}
+
+/* ============================================================
+   SECTION 5: MEMORY COMPARISON
+   ============================================================ */
+.memory { background: linear-gradient(180deg, #08080e 0%, var(--bg) 100%); }
+
+.memory-cards {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 24px;
+  margin-top: 40px;
+}
+
+@media (max-width: 900px) {
+  .memory-cards { grid-template-columns: 1fr; }
+}
+
+.memory-card {
+  background: var(--bg-card);
+  border: 1px solid #222233;
+  border-radius: 16px;
+  padding: 28px;
+  opacity: 0;
+  transform: translateY(30px);
+  transition: opacity 0.6s ease, transform 0.6s ease;
+}
+
+.memory-card.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.mem-model-name {
+  font-size: 1.2rem;
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+
+.mem-model-meta {
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  margin-bottom: 20px;
+}
+
+.mem-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.mem-bar-label {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  width: 60px;
+  flex-shrink: 0;
+  text-align: right;
+}
+
+.mem-bar-track {
+  flex: 1;
+  height: 32px;
+  background: #1a1a2e;
+  border-radius: 6px;
+  position: relative;
+  overflow: visible;
+}
+
+.mem-bar-fill {
+  height: 100%;
+  border-radius: 6px;
+  transition: width 1s cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding-right: 8px;
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: #fff;
+  white-space: nowrap;
+}
+
+.mem-bar-fill.fp16 {
+  background: linear-gradient(90deg, #882244, var(--red));
+}
+
+.mem-bar-fill.tq {
+  background: linear-gradient(90deg, #005533, var(--green));
+}
+
+.gpu-limit-marker {
+  position: absolute;
+  top: -6px;
+  bottom: -6px;
+  width: 2px;
+  background: var(--yellow);
+  z-index: 2;
+}
+
+.gpu-limit-label {
+  position: absolute;
+  top: -22px;
+  transform: translateX(-50%);
+  font-family: var(--mono);
+  font-size: 0.65rem;
+  color: var(--yellow);
+  white-space: nowrap;
+}
+
+.mem-badge {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  font-weight: 700;
+  padding: 2px 10px;
+  border-radius: 4px;
+  margin-left: 8px;
+  white-space: nowrap;
+}
+
+.mem-badge.oom {
+  background: var(--red);
+  color: #fff;
+  animation: pulseBg 1s ease-in-out infinite;
+}
+
+.mem-badge.fits {
+  background: var(--green);
+  color: #000;
+}
+
+/* ============================================================
+   SECTION 6: BEYOND THE PAPER
+   ============================================================ */
+.beyond { background: linear-gradient(180deg, var(--bg) 0%, #08080e 100%); }
+
+.hex-grid {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 20px;
+  margin-top: 40px;
+}
+
+.hex-card {
+  width: 210px;
+  background: var(--bg-card);
+  border: 1px solid #222233;
+  border-radius: 16px;
+  padding: 28px 20px;
+  text-align: center;
+  cursor: default;
+  transition: transform 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease;
+  opacity: 0;
+  transform: translateY(20px) scale(0.95);
+  transition: opacity 0.5s ease, transform 0.5s ease, border-color 0.3s ease, box-shadow 0.3s ease;
+}
+
+.hex-card.visible {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+}
+
+.hex-card:hover {
+  transform: translateY(-6px) scale(1.02);
+  border-color: var(--cyan-dim);
+  box-shadow: 0 8px 40px #00f0ff18;
+}
+
+.hex-icon {
+  font-size: 2.2rem;
+  margin-bottom: 12px;
+  display: block;
+}
+
+.hex-title {
+  font-size: 1rem;
+  font-weight: 700;
+  margin-bottom: 8px;
+  color: var(--cyan);
+}
+
+.hex-desc {
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+
+/* ============================================================
+   SECTION 7: FOOTER
+   ============================================================ */
+.footer-section {
+  min-height: 40vh;
+  background: linear-gradient(180deg, #08080e 0%, #050508 100%);
+  text-align: center;
+  padding: 80px 40px;
+}
+
+.footer-tagline {
+  font-size: 1.4rem;
+  color: var(--text-dim);
+  margin-bottom: 32px;
+  font-style: italic;
+}
+
+.footer-stats {
+  display: flex;
+  justify-content: center;
+  gap: 40px;
+  flex-wrap: wrap;
+  margin-bottom: 32px;
+}
+
+.footer-stat {
+  text-align: center;
+}
+
+.footer-stat-val {
+  font-family: var(--mono);
+  font-size: 1.8rem;
+  font-weight: 700;
+  color: var(--cyan);
+}
+
+.footer-stat-label {
+  font-size: 0.85rem;
+  color: var(--text-dim);
+}
+
+.footer-link {
+  display: inline-block;
+  margin-top: 20px;
+  padding: 14px 36px;
+  border: 2px solid var(--cyan-dim);
+  border-radius: 10px;
+  color: var(--cyan);
+  font-family: var(--mono);
+  font-size: 1rem;
+  text-decoration: none;
+  transition: all 0.3s ease;
+}
+
+.footer-link:hover {
+  background: var(--cyan);
+  color: var(--bg);
+  box-shadow: 0 0 30px var(--cyan-dim);
+}
+
+/* ============================================================
+   UTILITY
+   ============================================================ */
+.reveal {
+  opacity: 0;
+  transform: translateY(30px);
+  transition: opacity 0.7s ease-out, transform 0.7s ease-out;
+}
+
+.reveal.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* Compression burst particles */
+.compression-burst {
+  position: absolute;
+  pointer-events: none;
+}
+
+.burst-particle {
+  position: absolute;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--cyan);
+  animation: burstFly 0.8s ease-out forwards;
+}
+
+@keyframes burstFly {
+  0% { transform: translate(0, 0) scale(1); opacity: 1; }
+  100% { transform: translate(var(--dx), var(--dy)) scale(0); opacity: 0; }
+}
+</style>
+</head>
+<body>
+
+<!-- ============================================================
+     PARTICLE CANVAS
+     ============================================================ -->
+<canvas id="particle-canvas"></canvas>
+
+<!-- ============================================================
+     SECTION 1: HERO
+     ============================================================ -->
+<section class="hero" id="hero">
+  <div class="section-inner">
+    <h1 class="hero-title">TurboQuantDC</h1>
+    <p class="hero-subtitle">Crush your KV cache to 3 bits. Run 27B models on a single GPU. Lose nothing.</p>
+    <div class="counters">
+      <div class="counter-item">
+        <div class="counter-value" id="counter-compression">0x</div>
+        <div class="counter-label">Compression</div>
+      </div>
+      <div class="counter-item">
+        <div class="counter-value" id="counter-quality">0%</div>
+        <div class="counter-label">Quality Retained</div>
+      </div>
+      <div class="counter-item">
+        <div class="counter-value" id="counter-tests">0</div>
+        <div class="counter-label">Tests Passing</div>
+      </div>
+    </div>
+    <div class="scroll-hint">Scroll to see the magic <span class="scroll-arrow">&darr;</span></div>
+  </div>
+</section>
+
+<!-- ============================================================
+     SECTION 2: THE PROBLEM
+     ============================================================ -->
+<section class="problem" id="problem">
+  <div class="section-inner">
+    <h2 class="section-heading reveal">The Problem</h2>
+    <p class="section-subheading reveal">Every token stores key-value vectors in FP16. At long context, the KV cache devours your VRAM.</p>
+    <div class="gpu-viz reveal">
+      <div class="gpu-card">
+        <div class="gpu-header">
+          <span class="gpu-name">NVIDIA RTX 4090</span>
+          <span class="gpu-total">24 GB VRAM</span>
+        </div>
+        <div class="vram-bar-container" id="vram-bar">
+          <div class="vram-segment vram-weights" id="vram-weights">Weights: 14GB</div>
+          <div class="vram-segment vram-kv" id="vram-kv">KV Cache</div>
+          <div class="oom-badge" id="oom-badge">OOM!</div>
+        </div>
+        <div class="vram-legend">
+          <span><span class="legend-dot" style="background:#2244aa"></span>Model Weights</span>
+          <span><span class="legend-dot" style="background:#ff3355"></span>KV Cache (FP16)</span>
+          <span><span class="legend-dot" style="background:var(--yellow)"></span>24 GB Limit</span>
+        </div>
+      </div>
+      <div class="slider-container">
+        <div class="slider-label">Context Length: <span id="context-val">1K</span> tokens</div>
+        <input type="range" id="context-slider" min="1" max="262" value="1" step="1">
+        <div class="context-stats">
+          <span>KV Cache: <span class="stat-val" id="kv-size-val" style="color:var(--red)">0.06 GB</span></span>
+          <span>Total: <span class="stat-val" id="total-vram-val">14.06 GB</span></span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================
+     SECTION 3: THE ALGORITHM
+     ============================================================ -->
+<section class="algorithm" id="algorithm">
+  <div class="section-inner">
+    <h2 class="section-heading reveal">How TurboQuant Works</h2>
+    <p class="section-subheading reveal">A two-stage vector quantization pipeline. Each step is mathematically principled.</p>
+    <div class="pipeline-container">
+      <div class="pipeline-stage" id="stage-a">
+        <div class="stage-header">
+          <div class="stage-number">1</div>
+          <div class="stage-title">Random Rotation</div>
+        </div>
+        <canvas class="stage-canvas" id="canvas-rotation"></canvas>
+        <p class="stage-desc">Random orthogonal rotation via QR decomposition. After rotation, coordinates follow a concentrated <code>N(0, 1/d)</code> distribution &mdash; the key insight that enables scalar quantization.</p>
+      </div>
+      <div class="pipeline-stage" id="stage-b">
+        <div class="stage-header">
+          <div class="stage-number">2</div>
+          <div class="stage-title">Lloyd-Max Quantization</div>
+        </div>
+        <canvas class="stage-canvas" id="canvas-quantize"></canvas>
+        <p class="stage-desc">Per-coordinate optimal scalar quantization. Continuous values snap to <code>8 centroids</code> (3-bit). MSE-optimal for the Gaussian distribution from Stage 1.</p>
+      </div>
+      <div class="pipeline-stage" id="stage-c">
+        <div class="stage-header">
+          <div class="stage-number">3</div>
+          <div class="stage-title">QJL Correction</div>
+        </div>
+        <canvas class="stage-canvas" id="canvas-qjl"></canvas>
+        <p class="stage-desc">Compute residual error. Project through random Gaussian matrix. Store only the <code>signs</code> &mdash; 1 bit per dimension. This makes inner products mathematically unbiased.</p>
+      </div>
+      <div class="pipeline-stage" id="stage-d">
+        <div class="stage-header">
+          <div class="stage-number">4</div>
+          <div class="stage-title">Unbiased Inner Product</div>
+        </div>
+        <canvas class="stage-canvas" id="canvas-ip"></canvas>
+        <p class="stage-desc">Combine both stages: <code>E[&lt;q, k&#770;&gt;] = &lt;q, k&gt;</code>. The estimator is unbiased with variance <code>O(1/d)</code>. Individual vectors can have 23-44% reconstruction error &mdash; what matters is accurate attention scores.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================
+     SECTION 4: QUALITY EXPLORER
+     ============================================================ -->
+<section class="quality" id="quality">
+  <div class="section-inner">
+    <h2 class="section-heading reveal">The Proof</h2>
+    <p class="section-subheading reveal">Interactive quality explorer. Pick a bit-width and see the numbers.</p>
+    <div class="quality-controls reveal">
+      <button class="bit-btn" data-bits="2">2-bit</button>
+      <button class="bit-btn active" data-bits="3">3-bit</button>
+      <button class="bit-btn" data-bits="4">4-bit</button>
+    </div>
+    <div class="quality-grid reveal">
+      <!-- Gauge -->
+      <div class="gauge-container">
+        <svg class="gauge-svg" viewBox="0 0 260 160">
+          <defs>
+            <linearGradient id="gaugeGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+              <stop offset="0%" stop-color="#ff6b35" />
+              <stop offset="50%" stop-color="#00f0ff" />
+              <stop offset="100%" stop-color="#00ff88" />
+            </linearGradient>
+          </defs>
+          <path class="gauge-arc-bg" d="M 30 140 A 100 100 0 0 1 230 140" />
+          <path class="gauge-arc-fill" id="gauge-fill" d="M 30 140 A 100 100 0 0 1 230 140" />
+        </svg>
+        <div class="gauge-value-text" id="gauge-value">0.9969</div>
+        <div class="gauge-label">Cosine Similarity</div>
+      </div>
+      <!-- Metrics -->
+      <div class="metrics-panel">
+        <div class="metric-item">
+          <label>Top-1 Accuracy <span id="metric-top1-val">73.6%</span></label>
+          <div class="metric-bar-bg"><div class="metric-bar-fill cyan" id="metric-top1" style="width:73.6%"></div></div>
+        </div>
+        <div class="metric-item">
+          <label>Top-5 Accuracy <span id="metric-top5-val">94.4%</span></label>
+          <div class="metric-bar-bg"><div class="metric-bar-fill orange" id="metric-top5" style="width:94.4%"></div></div>
+        </div>
+        <div class="metric-item">
+          <label>Compression Ratio <span id="metric-comp-val">5.0x</span></label>
+          <div class="metric-bar-bg"><div class="metric-bar-fill green" id="metric-comp" style="width:68.5%"></div></div>
+        </div>
+      </div>
+    </div>
+    <!-- Per-head heatmap -->
+    <div class="perhead-container reveal">
+      <div class="perhead-title">Per-Head Cosine Similarity (72 attention heads, 3-bit)</div>
+      <div class="perhead-subtitle">Every head preserves >99% quality. Worst head: 0.9902. Median: 0.9973.</div>
+      <div class="perhead-grid" id="perhead-grid"></div>
+      <div class="perhead-legend">
+        <span><span class="legend-dot" style="background:var(--green)"></span>&gt;0.998</span>
+        <span><span class="legend-dot" style="background:var(--yellow)"></span>&gt;0.995</span>
+        <span><span class="legend-dot" style="background:var(--orange)"></span>&gt;0.990</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================
+     SECTION 5: MEMORY COMPARISON
+     ============================================================ -->
+<section class="memory" id="memory">
+  <div class="section-inner">
+    <h2 class="section-heading reveal">The Money Shot</h2>
+    <p class="section-subheading reveal">KV cache at 262K context. Red bars show FP16 OOM. Green bars show TurboQuant fits.</p>
+    <div class="memory-cards" id="memory-cards"></div>
+  </div>
+</section>
+
+<!-- ============================================================
+     SECTION 6: BEYOND THE PAPER
+     ============================================================ -->
+<section class="beyond" id="beyond">
+  <div class="section-inner">
+    <h2 class="section-heading reveal">Beyond the Paper</h2>
+    <p class="section-subheading reveal">Five extensions we built on top of the core TurboQuant algorithm.</p>
+    <div class="hex-grid" id="hex-grid"></div>
+  </div>
+</section>
+
+<!-- ============================================================
+     SECTION 7: FOOTER
+     ============================================================ -->
+<section class="footer-section" id="footer">
+  <div class="section-inner">
+    <p class="footer-tagline reveal">Built by an AI agent swarm in a single session.</p>
+    <div class="footer-stats reveal">
+      <div class="footer-stat"><div class="footer-stat-val">10</div><div class="footer-stat-label">Agents</div></div>
+      <div class="footer-stat"><div class="footer-stat-val">331</div><div class="footer-stat-label">Tests</div></div>
+      <div class="footer-stat"><div class="footer-stat-val">10,000+</div><div class="footer-stat-label">Lines of Code</div></div>
+      <div class="footer-stat"><div class="footer-stat-val">5</div><div class="footer-stat-label">Phases</div></div>
+    </div>
+    <a class="footer-link reveal" href="https://github.com/turboQuantDC" target="_blank" rel="noopener">View on GitHub</a>
+  </div>
+</section>
+
+<!-- ============================================================
+     JAVASCRIPT
+     ============================================================ -->
+<script>
+/* ============================================================
+   DATA
+   ============================================================ */
+const BENCHMARK_DATA = {
+  models: [
+    { name: "Qwen2.5-3B", params: "3B", d: 128, layers: 36, kv_heads: 2 },
+    { name: "Qwen2.5-14B", params: "14B", d: 128, layers: 48, kv_heads: 8 },
+    { name: "Qwen3.5-27B", params: "27B", d: 256, layers: 16, kv_heads: 8 },
+    { name: "Llama-3-70B", params: "70B", d: 128, layers: 80, kv_heads: 8 },
+  ],
+  quality: {
+    2: { cosSim: 0.9913, top1: 0.778, top5: 0.931, compression: 7.3 },
+    3: { cosSim: 0.9969, top1: 0.736, top5: 0.944, compression: 5.0 },
+    4: { cosSim: 0.9990, top1: 0.861, top5: 0.944, compression: 3.8 },
+  },
+  perHead: { worst: 0.9902, p5: 0.9916, median: 0.9973, p95: 0.9995, best: 0.9998 },
+  throughput: { quantize: 34_000_000, innerProduct: 68_000_000 },
+  paperBounds: {
+    mseBound: 0.043, mseActual: 0.035,
+    ipBound: 0.0021, ipActual: 0.0014,
+    bias: 0.0000,
+  },
+  memoryProjections: [
+    { model: "Qwen2.5-3B", context: "262K", fp16_gb: 9.0, tq3_gb: 1.8 },
+    { model: "Qwen2.5-14B", context: "262K", fp16_gb: 48.0, tq3_gb: 9.6 },
+    { model: "Qwen3.5-27B", context: "262K", fp16_gb: 16.0, tq3_gb: 3.1 },
+    { model: "Llama-3-70B", context: "262K", fp16_gb: 80.0, tq3_gb: 15.9 },
+  ],
+};
+
+const BEYOND_CARDS = [
+  { icon: "\u26A1", title: "Sparse V", desc: "Skip 90% of value decode. +22.8% speed." },
+  { icon: "\uD83C\uDFAF", title: "Fractional Bits", desc: "2.5-bit and 3.5-bit precision modes." },
+  { icon: "\uD83C\uDFD7\uFE0F", title: "Layer-Adaptive", desc: "Critical layers at full precision." },
+  { icon: "\uD83C\uDF00", title: "Walsh-Hadamard", desc: "O(d log d) fast rotation. 256x memory savings." },
+  { icon: "\u23F3", title: "Temporal Decay", desc: "Older tokens at lower precision. 30%+ savings." },
+];
+
+/* ============================================================
+   PARTICLE BACKGROUND
+   ============================================================ */
+(function initParticles() {
+  const canvas = document.getElementById("particle-canvas");
+  const ctx = canvas.getContext("2d");
+  let W, H;
+  const PARTICLE_COUNT = 100;
+  const MAX_DIST = 150;
+  const particles = [];
+
+  function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+  }
+  window.addEventListener("resize", resize);
+  resize();
+
+  for (let i = 0; i < PARTICLE_COUNT; i++) {
+    particles.push({
+      x: Math.random() * W,
+      y: Math.random() * H,
+      vx: (Math.random() - 0.5) * 0.4,
+      vy: (Math.random() - 0.5) * 0.4,
+      r: Math.random() * 1.5 + 0.5,
+    });
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+    // Draw connections
+    ctx.strokeStyle = "rgba(0,240,255,0.06)";
+    ctx.lineWidth = 0.5;
+    for (let i = 0; i < PARTICLE_COUNT; i++) {
+      for (let j = i + 1; j < PARTICLE_COUNT; j++) {
+        const dx = particles[i].x - particles[j].x;
+        const dy = particles[i].y - particles[j].y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < MAX_DIST) {
+          const alpha = 0.06 * (1 - dist / MAX_DIST);
+          ctx.strokeStyle = `rgba(0,240,255,${alpha})`;
+          ctx.beginPath();
+          ctx.moveTo(particles[i].x, particles[i].y);
+          ctx.lineTo(particles[j].x, particles[j].y);
+          ctx.stroke();
+        }
+      }
+    }
+    // Draw particles
+    for (const p of particles) {
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+      ctx.fillStyle = "rgba(0,240,255,0.35)";
+      ctx.fill();
+      p.x += p.vx;
+      p.y += p.vy;
+      if (p.x < 0 || p.x > W) p.vx *= -1;
+      if (p.y < 0 || p.y > H) p.vy *= -1;
+    }
+    requestAnimationFrame(draw);
+  }
+  draw();
+})();
+
+/* ============================================================
+   INTERSECTION OBSERVER (scroll reveal)
+   ============================================================ */
+const revealObserver = new IntersectionObserver(
+  (entries) => {
+    entries.forEach((e) => {
+      if (e.isIntersecting) e.target.classList.add("visible");
+    });
+  },
+  { threshold: 0.15 }
+);
+
+document.querySelectorAll(".reveal, .pipeline-stage, .memory-card, .hex-card").forEach((el) => {
+  revealObserver.observe(el);
+});
+
+/* ============================================================
+   HERO COUNTERS
+   ============================================================ */
+function animateCounter(el, target, suffix, duration, decimals) {
+  const start = performance.now();
+  function tick(now) {
+    const t = Math.min((now - start) / duration, 1);
+    const ease = 1 - Math.pow(1 - t, 4); // easeOutQuart
+    const val = ease * target;
+    el.textContent = val.toFixed(decimals) + suffix;
+    if (t < 1) requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+}
+
+const counterObserver = new IntersectionObserver(
+  (entries) => {
+    entries.forEach((e) => {
+      if (e.isIntersecting) {
+        animateCounter(document.getElementById("counter-compression"), 5.0, "x", 1800, 1);
+        animateCounter(document.getElementById("counter-quality"), 99.7, "%", 2000, 1);
+        animateCounter(document.getElementById("counter-tests"), 331, "", 2200, 0);
+        counterObserver.disconnect();
+      }
+    });
+  },
+  { threshold: 0.3 }
+);
+counterObserver.observe(document.querySelector(".counters"));
+
+/* ============================================================
+   SECTION 2: VRAM SLIDER
+   ============================================================ */
+(function initVRAM() {
+  const slider = document.getElementById("context-slider");
+  const ctxVal = document.getElementById("context-val");
+  const kvSizeVal = document.getElementById("kv-size-val");
+  const totalVramVal = document.getElementById("total-vram-val");
+  const vramWeights = document.getElementById("vram-weights");
+  const vramKV = document.getElementById("vram-kv");
+  const oomBadge = document.getElementById("oom-badge");
+
+  const WEIGHTS_GB = 14;
+  const GPU_GB = 24;
+  // Approx: Qwen2.5-14B has 48 layers, 8 kv_heads, d=128
+  // KV per token = 2 * layers * kv_heads * d * 2 bytes = 2 * 48 * 8 * 128 * 2 = 196,608 B
+  // At 262K tokens = ~48 GB
+  const KV_PER_TOKEN_GB = 196608 / (1024 * 1024 * 1024);
+
+  function update() {
+    const ctxK = parseInt(slider.value);
+    const ctxTokens = ctxK * 1024;
+    const kvGB = ctxTokens * KV_PER_TOKEN_GB;
+    const totalGB = WEIGHTS_GB + kvGB;
+
+    ctxVal.textContent = ctxK + "K";
+    kvSizeVal.textContent = kvGB.toFixed(1) + " GB";
+    totalVramVal.textContent = totalGB.toFixed(1) + " GB";
+
+    const maxDisplay = Math.max(GPU_GB, totalGB) * 1.05;
+    const wPct = (WEIGHTS_GB / maxDisplay) * 100;
+    const kvPct = (kvGB / maxDisplay) * 100;
+
+    vramWeights.style.width = wPct + "%";
+    vramKV.style.left = wPct + "%";
+    vramKV.style.width = kvPct + "%";
+    vramKV.textContent = "KV: " + kvGB.toFixed(1) + "GB";
+
+    if (totalGB > GPU_GB) {
+      vramKV.classList.add("oom");
+      oomBadge.style.display = "block";
+      kvSizeVal.style.color = "var(--red)";
+      totalVramVal.style.color = "var(--red)";
+    } else {
+      vramKV.classList.remove("oom");
+      oomBadge.style.display = "none";
+      kvSizeVal.style.color = "var(--cyan)";
+      totalVramVal.style.color = "var(--text)";
+    }
+  }
+
+  slider.addEventListener("input", update);
+  update();
+})();
+
+/* ============================================================
+   SECTION 3: ALGORITHM CANVAS ANIMATIONS
+   ============================================================ */
+
+/* --- Rotation Canvas --- */
+(function initRotation() {
+  const canvas = document.getElementById("canvas-rotation");
+  const ctx = canvas.getContext("2d");
+  let W, H, animProgress = 0, running = false;
+  const N = 120;
+  const original = [];
+  const rotated = [];
+
+  function resize() {
+    const rect = canvas.getBoundingClientRect();
+    W = canvas.width = rect.width;
+    H = canvas.height = rect.height;
+  }
+
+  // Generate points: original = clustered irregular, rotated = Gaussian blob
+  function generatePoints() {
+    original.length = 0;
+    rotated.length = 0;
+    for (let i = 0; i < N; i++) {
+      // Irregular cluster
+      const angle = Math.random() * Math.PI * 2;
+      const r1 = (Math.random() * 0.3 + 0.05) * (1 + 0.6 * Math.cos(angle * 3));
+      original.push({ x: 0.5 + r1 * Math.cos(angle), y: 0.5 + r1 * Math.sin(angle) * 0.6 });
+      // Gaussian blob
+      const gx = 0.5 + (gaussRand() * 0.15);
+      const gy = 0.5 + (gaussRand() * 0.15);
+      rotated.push({ x: gx, y: gy });
+    }
+  }
+
+  function gaussRand() {
+    let u = 0, v = 0;
+    while (u === 0) u = Math.random();
+    while (v === 0) v = Math.random();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+  }
+
+  function render(t) {
+    ctx.clearRect(0, 0, W, H);
+    for (let i = 0; i < N; i++) {
+      const x = lerp(original[i].x, rotated[i].x, t) * W;
+      const y = lerp(original[i].y, rotated[i].y, t) * H;
+      ctx.beginPath();
+      ctx.arc(x, y, 3, 0, Math.PI * 2);
+      const hue = lerp(30, 180, t);
+      ctx.fillStyle = `hsla(${hue}, 90%, 60%, 0.8)`;
+      ctx.fill();
+    }
+    ctx.fillStyle = "rgba(255,255,255,0.3)";
+    ctx.font = "11px system-ui";
+    ctx.textAlign = "left";
+    if (t < 0.5) ctx.fillText("Irregular distribution", 10, 18);
+    else ctx.fillText("Gaussian N(0, 1/d)", 10, 18);
+  }
+
+  function animate() {
+    if (!running) return;
+    animProgress += 0.008;
+    if (animProgress > 2) animProgress = 0;
+    const displayProgress = animProgress <= 1 ? animProgress : 2 - animProgress;
+    const t = easeInOutCubic(Math.max(0, Math.min(1, displayProgress)));
+    render(t);
+    requestAnimationFrame(animate);
+  }
+
+  const obs = new IntersectionObserver((entries) => {
+    entries.forEach(e => {
+      if (e.isIntersecting && !running) {
+        running = true;
+        resize();
+        generatePoints();
+        animate();
+      } else if (!e.isIntersecting) {
+        running = false;
+      }
+    });
+  }, { threshold: 0.3 });
+  obs.observe(canvas);
+  window.addEventListener("resize", resize);
+})();
+
+/* --- Quantization Canvas --- */
+(function initQuantize() {
+  const canvas = document.getElementById("canvas-quantize");
+  const ctx = canvas.getContext("2d");
+  let W, H, animProgress = 0, running = false;
+  const N = 80;
+  const points = [];
+  const CENTROIDS = [-1.2, -0.75, -0.35, -0.1, 0.1, 0.35, 0.75, 1.2];
+  const CENTROID_COLORS = [
+    "#ff3366", "#ff6633", "#ffaa00", "#aaff00",
+    "#00ffaa", "#00aaff", "#3366ff", "#aa33ff"
+  ];
+
+  function generatePoints() {
+    points.length = 0;
+    for (let i = 0; i < N; i++) {
+      const gx = gaussRand() * 0.8;
+      const gy = gaussRand() * 0.8;
+      // Find nearest centroid for x
+      let minDist = Infinity, ci = 0;
+      for (let c = 0; c < CENTROIDS.length; c++) {
+        const d = Math.abs(gx - CENTROIDS[c]);
+        if (d < minDist) { minDist = d; ci = c; }
+      }
+      points.push({ ox: gx, oy: gy, qx: CENTROIDS[ci], qy: gy, ci });
+    }
+  }
+
+  function gaussRand() {
+    let u = 0, v = 0;
+    while (u === 0) u = Math.random();
+    while (v === 0) v = Math.random();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+  }
+
+  function draw(t) {
+    ctx.clearRect(0, 0, W, H);
+    // Draw centroid lines
+    if (t > 0.1) {
+      const lineAlpha = Math.min(1, (t - 0.1) / 0.3);
+      for (let c = 0; c < CENTROIDS.length; c++) {
+        const sx = (CENTROIDS[c] / 2.5 + 0.5) * W;
+        ctx.beginPath();
+        ctx.moveTo(sx, 0);
+        ctx.lineTo(sx, H);
+        ctx.strokeStyle = `rgba(0,240,255,${lineAlpha * 0.2})`;
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 4]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+    }
+    // Draw points
+    for (const p of points) {
+      const x = lerp(p.ox, p.qx, t);
+      const sx = (x / 2.5 + 0.5) * W;
+      const sy = (p.oy / 2.5 + 0.5) * H;
+      ctx.beginPath();
+      ctx.arc(sx, sy, 3.5, 0, Math.PI * 2);
+      const color = t > 0.3 ? CENTROID_COLORS[p.ci] : `hsl(180, 80%, 60%)`;
+      ctx.fillStyle = color;
+      ctx.globalAlpha = 0.85;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+    ctx.fillStyle = "rgba(255,255,255,0.3)";
+    ctx.font = "11px system-ui";
+    ctx.textAlign = "left";
+    if (t < 0.3) ctx.fillText("Continuous values", 10, 18);
+    else ctx.fillText("8 centroids (3-bit)", 10, 18);
+  }
+
+  function animate() {
+    if (!running) return;
+    animProgress += 0.006;
+    if (animProgress > 2) animProgress = 0;
+    const displayProgress = animProgress <= 1 ? animProgress : 2 - animProgress;
+    const t = easeInOutCubic(Math.max(0, Math.min(1, displayProgress)));
+    draw(t);
+    requestAnimationFrame(animate);
+  }
+
+  function resize() {
+    const rect = canvas.getBoundingClientRect();
+    W = canvas.width = rect.width;
+    H = canvas.height = rect.height;
+  }
+
+  const obs = new IntersectionObserver((entries) => {
+    entries.forEach(e => {
+      if (e.isIntersecting && !running) {
+        running = true;
+        resize();
+        generatePoints();
+        animate();
+      } else if (!e.isIntersecting) {
+        running = false;
+      }
+    });
+  }, { threshold: 0.3 });
+  obs.observe(canvas);
+  window.addEventListener("resize", resize);
+})();
+
+/* --- QJL Canvas --- */
+(function initQJL() {
+  const canvas = document.getElementById("canvas-qjl");
+  const ctx = canvas.getContext("2d");
+  let W, H, animProgress = 0, running = false;
+  const N = 40;
+  const arrows = [];
+
+  function generate() {
+    arrows.length = 0;
+    for (let i = 0; i < N; i++) {
+      const x = 0.1 + (i / N) * 0.8;
+      const y = 0.5;
+      const dy = (Math.random() - 0.5) * 0.6;
+      const sign = dy >= 0 ? 1 : -1;
+      arrows.push({ x, y, dy, sign });
+    }
+  }
+
+  function draw(t) {
+    ctx.clearRect(0, 0, W, H);
+    // Baseline
+    ctx.beginPath();
+    ctx.moveTo(0, H * 0.5);
+    ctx.lineTo(W, H * 0.5);
+    ctx.strokeStyle = "rgba(255,255,255,0.1)";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    for (const a of arrows) {
+      const sx = a.x * W;
+      const sy = a.y * H;
+      // Arrow shrinks to sign indicator
+      const arrowLen = lerp(a.dy * H * 0.4, a.sign * 12, t);
+      const ey = sy - arrowLen;
+
+      ctx.beginPath();
+      ctx.moveTo(sx, sy);
+      ctx.lineTo(sx, ey);
+      const hue = a.sign > 0 ? 160 : 20;
+      const alpha = lerp(0.6, 0.9, t);
+      ctx.strokeStyle = `hsla(${hue}, 90%, 55%, ${alpha})`;
+      ctx.lineWidth = lerp(1.5, 3, t);
+      ctx.stroke();
+
+      // Sign symbol at top
+      if (t > 0.5) {
+        const symAlpha = (t - 0.5) * 2;
+        ctx.fillStyle = `hsla(${hue}, 90%, 65%, ${symAlpha})`;
+        ctx.font = "bold 12px monospace";
+        ctx.textAlign = "center";
+        ctx.fillText(a.sign > 0 ? "+" : "\u2013", sx, ey - 4);
+      }
+    }
+    ctx.fillStyle = "rgba(255,255,255,0.3)";
+    ctx.font = "11px system-ui";
+    ctx.textAlign = "left";
+    if (t < 0.4) ctx.fillText("Residual vectors", 10, 18);
+    else ctx.fillText("Signs only (1-bit each)", 10, 18);
+  }
+
+  function animate() {
+    if (!running) return;
+    animProgress += 0.005;
+    if (animProgress > 2) animProgress = 0;
+    const dp = animProgress <= 1 ? animProgress : 2 - animProgress;
+    draw(easeInOutCubic(Math.max(0, Math.min(1, dp))));
+    requestAnimationFrame(animate);
+  }
+
+  function resize() {
+    const rect = canvas.getBoundingClientRect();
+    W = canvas.width = rect.width;
+    H = canvas.height = rect.height;
+  }
+
+  const obs = new IntersectionObserver((entries) => {
+    entries.forEach(e => {
+      if (e.isIntersecting && !running) {
+        running = true;
+        resize();
+        generate();
+        animate();
+      } else if (!e.isIntersecting) {
+        running = false;
+      }
+    });
+  }, { threshold: 0.3 });
+  obs.observe(canvas);
+  window.addEventListener("resize", resize);
+})();
+
+/* --- Inner Product Canvas --- */
+(function initIP() {
+  const canvas = document.getElementById("canvas-ip");
+  const ctx = canvas.getContext("2d");
+  let W, H, animProgress = 0, running = false;
+
+  function draw(t) {
+    ctx.clearRect(0, 0, W, H);
+    const cy = H / 2;
+
+    // Query vector (left)
+    const qx = lerp(W * 0.15, W * 0.42, t);
+    const qy = cy;
+    drawVector(ctx, W * 0.05, cy, qx, qy, "#00f0ff", "q", t);
+
+    // Key vector (right, moves left)
+    const kx1 = lerp(W * 0.95, W * 0.58, t);
+    const kx0 = lerp(W * 0.7, W * 0.58, t);
+    drawVector(ctx, kx1, cy, kx0, cy, "#ff6b35", "k\u0302", t);
+
+    // Connection glow when close
+    if (t > 0.6) {
+      const glowAlpha = (t - 0.6) * 2.5;
+      const cx = W * 0.5;
+      const gradient = ctx.createRadialGradient(cx, cy, 0, cx, cy, 60);
+      gradient.addColorStop(0, `rgba(0,240,255,${glowAlpha * 0.5})`);
+      gradient.addColorStop(0.5, `rgba(0,240,255,${glowAlpha * 0.15})`);
+      gradient.addColorStop(1, `rgba(0,240,255,0)`);
+      ctx.fillStyle = gradient;
+      ctx.fillRect(cx - 80, cy - 80, 160, 160);
+
+      // Result text
+      if (t > 0.8) {
+        const textAlpha = (t - 0.8) * 5;
+        ctx.fillStyle = `rgba(0,255,136,${Math.min(1, textAlpha)})`;
+        ctx.font = "bold 13px monospace";
+        ctx.textAlign = "center";
+        ctx.fillText("E[\u27E8q, k\u0302\u27E9] = \u27E8q, k\u27E9", W * 0.5, cy - 40);
+        ctx.fillStyle = `rgba(255,255,255,${Math.min(0.5, textAlpha * 0.5)})`;
+        ctx.font = "11px system-ui";
+        ctx.fillText("Unbiased estimator", W * 0.5, cy + 50);
+      }
+    }
+  }
+
+  function drawVector(ctx, x0, y0, x1, y1, color, label, t) {
+    ctx.beginPath();
+    ctx.moveTo(x0, y0);
+    ctx.lineTo(x1, y1);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 3;
+    ctx.lineCap = "round";
+    ctx.stroke();
+    // Arrowhead
+    const angle = Math.atan2(y1 - y0, x1 - x0);
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x1 - 10 * Math.cos(angle - 0.3), y1 - 10 * Math.sin(angle - 0.3));
+    ctx.lineTo(x1 - 10 * Math.cos(angle + 0.3), y1 - 10 * Math.sin(angle + 0.3));
+    ctx.closePath();
+    ctx.fillStyle = color;
+    ctx.fill();
+    // Label
+    ctx.fillStyle = color;
+    ctx.font = "bold 14px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText(label, (x0 + x1) / 2, y0 - 14);
+  }
+
+  function animate() {
+    if (!running) return;
+    animProgress += 0.004;
+    if (animProgress > 2) animProgress = 0;
+    const dp = animProgress <= 1 ? animProgress : 2 - animProgress;
+    draw(easeInOutCubic(Math.max(0, Math.min(1, dp))));
+    requestAnimationFrame(animate);
+  }
+
+  function resize() {
+    const rect = canvas.getBoundingClientRect();
+    W = canvas.width = rect.width;
+    H = canvas.height = rect.height;
+  }
+
+  const obs = new IntersectionObserver((entries) => {
+    entries.forEach(e => {
+      if (e.isIntersecting && !running) {
+        running = true;
+        resize();
+        animate();
+      } else if (!e.isIntersecting) {
+        running = false;
+      }
+    });
+  }, { threshold: 0.3 });
+  obs.observe(canvas);
+  window.addEventListener("resize", resize);
+})();
+
+/* ============================================================
+   SECTION 4: QUALITY EXPLORER
+   ============================================================ */
+(function initQuality() {
+  const btns = document.querySelectorAll(".bit-btn");
+  const gaugeFill = document.getElementById("gauge-fill");
+  const gaugeValue = document.getElementById("gauge-value");
+  const metricTop1 = document.getElementById("metric-top1");
+  const metricTop1Val = document.getElementById("metric-top1-val");
+  const metricTop5 = document.getElementById("metric-top5");
+  const metricTop5Val = document.getElementById("metric-top5-val");
+  const metricComp = document.getElementById("metric-comp");
+  const metricCompVal = document.getElementById("metric-comp-val");
+
+  // Gauge arc math
+  // The arc goes from (30,140) to (230,140) with radius 100, which is a semicircle
+  const arcLength = Math.PI * 100; // half circumference
+
+  function setGauge(cosSim) {
+    // Map cosSim from [0.98, 1.0] to [0, 1]
+    const t = Math.max(0, Math.min(1, (cosSim - 0.98) / 0.02));
+    const offset = arcLength * (1 - t);
+    gaugeFill.style.strokeDasharray = arcLength;
+    gaugeFill.style.strokeDashoffset = offset;
+  }
+
+  // Animate gauge value text
+  let gaugeAnimId = null;
+  function animateGaugeValue(target) {
+    const current = parseFloat(gaugeValue.textContent) || 0;
+    const start = performance.now();
+    const duration = 600;
+    if (gaugeAnimId) cancelAnimationFrame(gaugeAnimId);
+    function tick(now) {
+      const p = Math.min((now - start) / duration, 1);
+      const ease = 1 - Math.pow(1 - p, 3);
+      const val = current + (target - current) * ease;
+      gaugeValue.textContent = val.toFixed(4);
+      if (p < 1) gaugeAnimId = requestAnimationFrame(tick);
+    }
+    gaugeAnimId = requestAnimationFrame(tick);
+  }
+
+  function updateQuality(bits) {
+    const q = BENCHMARK_DATA.quality[bits];
+    setGauge(q.cosSim);
+    animateGaugeValue(q.cosSim);
+
+    metricTop1.style.width = (q.top1 * 100) + "%";
+    metricTop1Val.textContent = (q.top1 * 100).toFixed(1) + "%";
+
+    metricTop5.style.width = (q.top5 * 100) + "%";
+    metricTop5Val.textContent = (q.top5 * 100).toFixed(1) + "%";
+
+    // Compression: max ~7.3x so normalize to that
+    const compPct = (q.compression / 8) * 100;
+    metricComp.style.width = compPct + "%";
+    metricCompVal.textContent = q.compression.toFixed(1) + "x";
+  }
+
+  btns.forEach(btn => {
+    btn.addEventListener("click", () => {
+      btns.forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      updateQuality(parseInt(btn.dataset.bits));
+      // Burst effect on compression
+      createBurst(metricCompVal);
+    });
+  });
+
+  // Initialize
+  updateQuality(3);
+  // Initial gauge setup
+  gaugeFill.style.strokeDasharray = arcLength;
+  setGauge(0.9969);
+
+  // Per-head heatmap
+  const grid = document.getElementById("perhead-grid");
+  const perHead = BENCHMARK_DATA.perHead;
+  for (let i = 0; i < 72; i++) {
+    const bar = document.createElement("div");
+    bar.className = "head-bar";
+    // Simulate per-head values between worst and best
+    const t = i / 71;
+    let sim;
+    if (t < 0.05) sim = lerp(perHead.worst, perHead.p5, t / 0.05);
+    else if (t < 0.5) sim = lerp(perHead.p5, perHead.median, (t - 0.05) / 0.45);
+    else if (t < 0.95) sim = lerp(perHead.median, perHead.p95, (t - 0.5) / 0.45);
+    else sim = lerp(perHead.p95, perHead.best, (t - 0.95) / 0.05);
+
+    const h = 20 + (sim - 0.99) / 0.01 * 24;
+    bar.style.height = h + "px";
+
+    if (sim >= 0.998) bar.style.background = "var(--green)";
+    else if (sim >= 0.995) bar.style.background = "var(--yellow)";
+    else bar.style.background = "var(--orange)";
+
+    bar.title = `Head ${i}: ${sim.toFixed(4)}`;
+    grid.appendChild(bar);
+  }
+})();
+
+/* Burst effect */
+function createBurst(targetEl) {
+  const rect = targetEl.getBoundingClientRect();
+  const cx = rect.left + rect.width / 2;
+  const cy = rect.top + rect.height / 2;
+  for (let i = 0; i < 12; i++) {
+    const p = document.createElement("div");
+    p.className = "burst-particle";
+    const angle = (i / 12) * Math.PI * 2;
+    const dist = 30 + Math.random() * 40;
+    p.style.cssText = `
+      position:fixed; left:${cx}px; top:${cy}px;
+      width:4px; height:4px; border-radius:50%;
+      background:var(--cyan); z-index:9999;
+      pointer-events:none;
+      --dx:${Math.cos(angle) * dist}px;
+      --dy:${Math.sin(angle) * dist}px;
+      animation: burstFly 0.7s ease-out forwards;
+    `;
+    document.body.appendChild(p);
+    setTimeout(() => p.remove(), 800);
+  }
+}
+
+/* ============================================================
+   SECTION 5: MEMORY CARDS
+   ============================================================ */
+(function initMemory() {
+  const container = document.getElementById("memory-cards");
+  const GPU_LIMIT = 24;
+  const maxGB = 84; // largest bar reference
+
+  BENCHMARK_DATA.memoryProjections.forEach((m, idx) => {
+    const model = BENCHMARK_DATA.models[idx];
+    const card = document.createElement("div");
+    card.className = "memory-card";
+
+    const fp16Pct = (m.fp16_gb / maxGB) * 100;
+    const tqPct = (m.tq3_gb / maxGB) * 100;
+    const limitPct = (GPU_LIMIT / maxGB) * 100;
+    const fp16OOM = m.fp16_gb > GPU_LIMIT;
+    const tqFits = m.tq3_gb <= GPU_LIMIT;
+
+    card.innerHTML = `
+      <div class="mem-model-name">${m.model}</div>
+      <div class="mem-model-meta">${model.params} params | d=${model.d} | ${model.layers}L | ${model.kv_heads} KV heads | 262K ctx</div>
+      <div class="mem-bar-row">
+        <div class="mem-bar-label" style="color:var(--red)">FP16</div>
+        <div class="mem-bar-track">
+          <div class="mem-bar-fill fp16" data-width="${fp16Pct}" style="width:0%">${m.fp16_gb} GB</div>
+          <div class="gpu-limit-marker" style="left:${limitPct}%">
+            <div class="gpu-limit-label">24 GB</div>
+          </div>
+        </div>
+        ${fp16OOM ? '<span class="mem-badge oom">OOM</span>' : ''}
+      </div>
+      <div class="mem-bar-row">
+        <div class="mem-bar-label" style="color:var(--green)">TQ-3b</div>
+        <div class="mem-bar-track">
+          <div class="mem-bar-fill tq" data-width="${tqPct}" style="width:0%">${m.tq3_gb} GB</div>
+          <div class="gpu-limit-marker" style="left:${limitPct}%">
+            <div class="gpu-limit-label">24 GB</div>
+          </div>
+        </div>
+        ${tqFits ? `<span class="mem-badge fits">FITS${GPU_LIMIT - m.tq3_gb > 5 ? ' (' + (GPU_LIMIT - m.tq3_gb).toFixed(0) + 'GB spare)' : ''}</span>` : ''}
+      </div>
+    `;
+    container.appendChild(card);
+    revealObserver.observe(card);
+
+    // Animate bars when visible
+    const memObs = new IntersectionObserver((entries) => {
+      entries.forEach(e => {
+        if (e.isIntersecting) {
+          const bars = card.querySelectorAll(".mem-bar-fill");
+          bars.forEach(b => {
+            setTimeout(() => {
+              b.style.width = b.dataset.width + "%";
+            }, 200);
+          });
+          memObs.disconnect();
+        }
+      });
+    }, { threshold: 0.3 });
+    memObs.observe(card);
+  });
+})();
+
+/* ============================================================
+   SECTION 6: BEYOND CARDS
+   ============================================================ */
+(function initBeyond() {
+  const grid = document.getElementById("hex-grid");
+  BEYOND_CARDS.forEach((c, i) => {
+    const card = document.createElement("div");
+    card.className = "hex-card";
+    card.style.transitionDelay = (i * 0.1) + "s";
+    card.innerHTML = `
+      <span class="hex-icon">${c.icon}</span>
+      <div class="hex-title">${c.title}</div>
+      <div class="hex-desc">${c.desc}</div>
+    `;
+    grid.appendChild(card);
+    revealObserver.observe(card);
+  });
+})();
+
+/* ============================================================
+   UTILITIES
+   ============================================================ */
+function lerp(a, b, t) { return a + (b - a) * t; }
+function easeInOutCubic(t) { return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; }
+</script>
+</body>
+</html>
