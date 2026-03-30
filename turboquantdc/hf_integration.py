@@ -57,9 +57,10 @@ class TurboQuantLayer:
         seed: Base random seed for this layer's quantizers.
     """
 
-    def __init__(self, bits: int = 3, seed: int = 42):
+    def __init__(self, bits: int = 3, seed: int = 42, mse_only: bool = False):
         self.bits = bits
         self.seed = seed
+        self.mse_only = mse_only  # Skip QJL, use full b-bit MSE for keys
         self._seq_len: int = 0
 
         # Lazily initialized on first update (need to know head_dim)
@@ -87,6 +88,7 @@ class TurboQuantLayer:
 
         # Shared estimator/quantizer (one per layer, shared across heads)
         self._key_est: Optional[TurboQuantEstimator] = None
+        self._key_pq: Optional[PolarQuant] = None  # Used when mse_only=True
         self._val_pq: Optional[PolarQuant] = None
 
     def _lazy_init(self, key_states: torch.Tensor, value_states: torch.Tensor) -> None:
@@ -105,9 +107,19 @@ class TurboQuantLayer:
         # device argument and move their buffers accordingly.
         device = str(self._device) if self._device is not None else "cpu"
 
-        self._key_est = TurboQuantEstimator(
-            d=d, bits=self.bits, seed=self.seed, device=device,
-        )
+        if self.mse_only:
+            # MSE-only mode: use PolarQuant for keys too (full b-bit, no QJL)
+            # This gives 8 centroids at 3-bit instead of 4 (2-bit MSE + 1-bit QJL)
+            # Better for generation quality where variance > bias matters
+            self._key_est = None
+            self._key_pq = PolarQuant(
+                d=d, bits=self.bits, seed=self.seed, device=device,
+            )
+        else:
+            self._key_est = TurboQuantEstimator(
+                d=d, bits=self.bits, seed=self.seed, device=device,
+            )
+            self._key_pq = None
         self._val_pq = PolarQuant(
             d=d, bits=self.bits, seed=self.seed + 100, device=device,
         )
@@ -127,7 +139,7 @@ class TurboQuantLayer:
             Tuple of (all_keys, all_values) dequantized from cache,
             each of shape [batch, num_heads, total_seq, head_dim].
         """
-        if self._key_est is None:
+        if self._key_est is None and self._key_pq is None:
             self._lazy_init(key_states, value_states)
 
         batch, num_heads, new_seq, head_dim = key_states.shape
@@ -136,23 +148,31 @@ class TurboQuantLayer:
         keys_flat = key_states.float().reshape(-1, head_dim)
         vals_flat = value_states.float().reshape(-1, head_dim)
 
-        # Compress keys with full estimator (MSE + QJL)
-        key_comp = self._key_est.quantize(keys_flat)
+        # Compress keys
+        key_norms = keys_flat.norm(dim=-1, keepdim=True)
+        keys_normalized = keys_flat / (key_norms + 1e-8)
+
+        if self.mse_only:
+            # MSE-only: use PolarQuant with full b-bit codebook (no QJL)
+            key_indices = self._key_pq.quantize(keys_normalized)
+            key_entry = {
+                "mse_indices": key_indices.reshape(batch, num_heads, new_seq, head_dim),
+                "vec_norm": key_norms.squeeze(-1).reshape(batch, num_heads, new_seq),
+            }
+        else:
+            # Full TurboQuant (MSE + QJL)
+            key_comp = self._key_est.quantize(keys_flat)
+            key_entry = {
+                "mse_indices": key_comp["mse_indices"].reshape(batch, num_heads, new_seq, head_dim),
+                "qjl_signs": key_comp["qjl_signs"].reshape(batch, num_heads, new_seq, -1),
+                "residual_norm": key_comp["residual_norm"].reshape(batch, num_heads, new_seq),
+                "vec_norm": key_comp["vec_norm"].reshape(batch, num_heads, new_seq),
+            }
 
         # Compress values with MSE-only PolarQuant
-        # Store norms separately for rescaling
         val_norms = vals_flat.norm(dim=-1, keepdim=True)
         vals_normalized = vals_flat / (val_norms + 1e-8)
         val_indices = self._val_pq.quantize(vals_normalized)
-
-        # Reshape compressed data back to [batch, num_heads, new_seq, ...]
-        n_flat = batch * num_heads * new_seq
-        key_entry = {
-            "mse_indices": key_comp["mse_indices"].reshape(batch, num_heads, new_seq, head_dim),
-            "qjl_signs": key_comp["qjl_signs"].reshape(batch, num_heads, new_seq, -1),
-            "residual_norm": key_comp["residual_norm"].reshape(batch, num_heads, new_seq),
-            "vec_norm": key_comp["vec_norm"].reshape(batch, num_heads, new_seq),
-        }
         val_entry = {
             "indices": val_indices.reshape(batch, num_heads, new_seq, head_dim),
             "norms": val_norms.squeeze(-1).reshape(batch, num_heads, new_seq),
@@ -192,7 +212,10 @@ class TurboQuantLayer:
         key_vnorm_flat = all_key_vec_norm.reshape(-1)
 
         # MSE dequantize: centroid lookup + unrotate
-        key_recon_flat = self._key_est.polar.dequantize(key_mse_flat)
+        if self.mse_only:
+            key_recon_flat = self._key_pq.dequantize(key_mse_flat)
+        else:
+            key_recon_flat = self._key_est.polar.dequantize(key_mse_flat)
         # Rescale by original vector norm
         key_recon_flat = key_recon_flat * key_vnorm_flat.unsqueeze(-1)
         keys_out = key_recon_flat.reshape(batch, num_heads, total_seq, head_dim)
@@ -329,11 +352,12 @@ class TurboQuantCache:
     # also works for generate().
     is_compileable = False
 
-    def __init__(self, bits: int = 3, seed: int = 42):
+    def __init__(self, bits: int = 3, seed: int = 42, mse_only: bool = False):
         if bits not in (2, 3, 4):
             raise ValueError(f"bits must be 2, 3, or 4, got {bits}")
         self.bits = bits
         self.seed = seed
+        self.mse_only = mse_only  # Skip QJL, use full b-bit MSE for keys
         self._layers: List[TurboQuantLayer] = []
 
     # ---- Implement the Cache protocol ----
@@ -361,10 +385,7 @@ class TurboQuantCache:
         """
         # Lazily create layers as needed
         while len(self._layers) <= layer_idx:
-            idx = len(self._layers)
-            self._layers.append(
-                TurboQuantLayer(bits=self.bits, seed=self.seed + idx)
-            )
+            self._layers.append(self._make_layer(len(self._layers)))
 
         return self._layers[layer_idx].update(key_states, value_states)
 
@@ -463,6 +484,38 @@ class TurboQuantCache:
         if layer_idx >= len(self._layers):
             raise IndexError(f"Layer {layer_idx} not in cache (have {len(self._layers)} layers)")
         return self._layers[layer_idx]._dequantize_all()
+
+    # ---- Layer factory (used by custom_attention patching) ----
+
+    def _make_layer(self, layer_idx: int) -> TurboQuantLayer:
+        """Create a new TurboQuantLayer for the given layer index.
+
+        Used internally by ``update()`` and by ``custom_attention.patch_model_attention()``
+        when layers need to be created lazily.
+        """
+        return TurboQuantLayer(bits=self.bits, seed=self.seed + layer_idx, mse_only=self.mse_only)
+
+    # ---- Custom attention integration ----
+
+    def enable_unbiased_attention(self, model: torch.nn.Module) -> torch.nn.Module:
+        """Patch a HuggingFace model to use TurboQuant's unbiased attention.
+
+        This replaces standard Q @ K^T attention with the full two-stage
+        unbiased inner product estimator.  At 3-bit, this is the difference
+        between garbled output and coherent generation.
+
+        After calling this, ``model.generate()`` will use TurboQuant attention
+        transparently.  The cache argument to ``generate()`` should be omitted
+        (or set to ``None``) since the patched model uses this cache directly.
+
+        Args:
+            model: A HuggingFace CausalLM model.
+
+        Returns:
+            The same model, patched in-place.
+        """
+        from .custom_attention import patch_model_attention
+        return patch_model_attention(model, self)
 
     # ---- TurboQuant-specific methods ----
 
