@@ -35,6 +35,14 @@ from .hf_integration import TurboQuantCache
 from .custom_attention import turboquant_attention, patch_model_attention
 from .streaming import StreamingInferenceEngine
 from .chunked_prefill import ChunkedPrefillEngine
+from .asymmetric import (
+    AsymmetricKVCache,
+    AsymmetricTurboQuantCache,
+    AsymmetricTurboQuantLayer,
+    PRESETS as ASYMMETRIC_PRESETS,
+    create_asymmetric_cache,
+    analyze_kv_norms,
+)
 
 __all__ = [
     # Codebook
@@ -82,6 +90,13 @@ __all__ = [
     "StreamingInferenceEngine",
     # Chunked Prefill
     "ChunkedPrefillEngine",
+    # Asymmetric K/V Compression
+    "AsymmetricKVCache",
+    "AsymmetricTurboQuantCache",
+    "AsymmetricTurboQuantLayer",
+    "ASYMMETRIC_PRESETS",
+    "create_asymmetric_cache",
+    "analyze_kv_norms",
 ]
 
 __version__ = "0.1.0"
