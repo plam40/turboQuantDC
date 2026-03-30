@@ -32,7 +32,9 @@ from .outlier import OutlierTurboQuant
 from .layer_adaptive import FP16Cache, LayerAdaptiveKVCache, estimate_memory, recommended_schedule
 from .temporal_decay import TemporalDecayCache
 from .hf_integration import TurboQuantCache
+from .custom_attention import turboquant_attention, patch_model_attention
 from .streaming import StreamingInferenceEngine
+from .chunked_prefill import ChunkedPrefillEngine
 
 __all__ = [
     # Codebook
@@ -69,12 +71,17 @@ __all__ = [
     "TemporalDecayCache",
     # HuggingFace Integration
     "TurboQuantCache",
+    # Custom Attention (unbiased inner products)
+    "turboquant_attention",
+    "patch_model_attention",
     # vLLM Integration
     "TurboQuantAttentionBackend",
     "TurboQuantCacheManager",
     "get_turboquant_config",
     # Streaming Inference
     "StreamingInferenceEngine",
+    # Chunked Prefill
+    "ChunkedPrefillEngine",
 ]
 
 __version__ = "0.1.0"

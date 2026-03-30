@@ -300,11 +300,15 @@ class TurboQuantLayer:
         batch = self._batch_size
         total_tokens = self._seq_len * n_heads * batch
 
-        mse_bits = max(self.bits - 1, 1)
-        qjl_m = self._key_est.qjl.m
-
-        # Key: mse_bits*d (MSE indices) + qjl_m*1 (signs) + 16 (res_norm) + 16 (vec_norm)
-        key_bits_per_token = mse_bits * d + qjl_m + 32
+        if self.mse_only:
+            # MSE-only mode: keys use full b-bit codebook, no QJL
+            # Key: bits*d (MSE indices) + 16 (vec_norm)
+            key_bits_per_token = self.bits * d + 16
+        else:
+            mse_bits = max(self.bits - 1, 1)
+            qjl_m = self._key_est.qjl.m
+            # Key: mse_bits*d (MSE indices) + qjl_m*1 (signs) + 16 (res_norm) + 16 (vec_norm)
+            key_bits_per_token = mse_bits * d + qjl_m + 32
         # Value: bits*d (MSE indices) + 16 (norm)
         val_bits_per_token = self.bits * d + 16
 
