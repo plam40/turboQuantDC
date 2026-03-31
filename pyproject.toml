@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "turboquantdc"
-version = "0.1.0"
+version = "0.2.0"
 description = "TurboQuant: 3-bit KV cache compression for LLMs with <0.5% attention quality loss"
 readme = "README.md"
 license = "MIT"

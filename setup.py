@@ -5,7 +5,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="turboquantdc",
-    version="0.1.0",
+    version="0.2.0",
     author="TurboQuantDC Contributors",
     description="TurboQuant: 3-bit KV cache compression for LLMs with <0.5% attention quality loss",
     long_description=long_description,
