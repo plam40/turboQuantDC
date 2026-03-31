@@ -726,3 +726,98 @@ class TestFusedAttentionNormCorrection:
         k_out, _ = cache.update(keys, values, layer_idx=0)
         sim = cosine_sim(keys, k_out)
         assert sim > 0.95, f"Fused path cosine similarity {sim:.4f} below 0.95"
+
+
+# ---------------------------------------------------------------------------
+# Test: use_residual_quant toggle
+# ---------------------------------------------------------------------------
+class TestResidualQuantToggle:
+    """Validate that use_residual_quant actually changes dequantization output.
+
+    Regression test for the bug where autoresearch sweeps of
+    use_residual_quant=True vs False produced identical scores because
+    GenerationCache ignored the flag entirely.
+    """
+
+    def test_rq_true_vs_false_produce_different_keys(self):
+        """Compressing the same vectors with RQ=True vs RQ=False must differ."""
+        keys, values = make_kv_states(seq_len=32, seed=42)
+
+        cache_rq = GenerationCache(
+            key_bits=3, val_bits=2, fp16_window=0, anchor_interval=0,
+            seed=SEED, use_residual_quant=True,
+        )
+        cache_no_rq = GenerationCache(
+            key_bits=3, val_bits=2, fp16_window=0, anchor_interval=0,
+            seed=SEED, use_residual_quant=False,
+        )
+
+        k_rq, _ = cache_rq.update(keys, values, layer_idx=0)
+        k_no_rq, _ = cache_no_rq.update(keys, values, layer_idx=0)
+
+        # With fp16_window=0, ALL tokens are compressed, so the outputs
+        # should differ when residual correction is toggled
+        diff = (k_rq - k_no_rq).abs().max().item()
+        assert diff > 1e-4, (
+            f"RQ=True and RQ=False produced identical keys (max diff={diff}). "
+            f"The use_residual_quant flag has no effect!"
+        )
+
+    def test_rq_true_has_better_quality(self):
+        """RQ=True should produce better key reconstruction than RQ=False."""
+        keys, values = make_kv_states(seq_len=64, seed=42)
+
+        cache_rq = GenerationCache(
+            key_bits=3, val_bits=2, fp16_window=0, anchor_interval=0,
+            seed=SEED, use_residual_quant=True,
+        )
+        cache_no_rq = GenerationCache(
+            key_bits=3, val_bits=2, fp16_window=0, anchor_interval=0,
+            seed=SEED, use_residual_quant=False,
+        )
+
+        k_rq, _ = cache_rq.update(keys, values, layer_idx=0)
+        k_no_rq, _ = cache_no_rq.update(keys, values, layer_idx=0)
+
+        sim_rq = cosine_sim(keys, k_rq)
+        sim_no_rq = cosine_sim(keys, k_no_rq)
+
+        assert sim_rq > sim_no_rq, (
+            f"RQ=True cosine sim ({sim_rq:.6f}) should be > "
+            f"RQ=False cosine sim ({sim_no_rq:.6f})"
+        )
+
+    def test_rq_false_values_unaffected(self):
+        """Values should be identical regardless of use_residual_quant."""
+        keys, values = make_kv_states(seq_len=32, seed=42)
+
+        cache_rq = GenerationCache(
+            key_bits=3, val_bits=2, fp16_window=0, anchor_interval=0,
+            seed=SEED, use_residual_quant=True,
+        )
+        cache_no_rq = GenerationCache(
+            key_bits=3, val_bits=2, fp16_window=0, anchor_interval=0,
+            seed=SEED, use_residual_quant=False,
+        )
+
+        _, v_rq = cache_rq.update(keys, values, layer_idx=0)
+        _, v_no_rq = cache_no_rq.update(keys, values, layer_idx=0)
+
+        # Values never use residual correction, so they should be identical
+        torch.testing.assert_close(v_rq, v_no_rq, atol=1e-6, rtol=1e-6)
+
+    def test_default_rq_is_true(self):
+        """GenerationCache default should have use_residual_quant=True."""
+        cache = GenerationCache()
+        assert cache.use_residual_quant is True
+
+    def test_config_summary_reflects_rq(self):
+        """config_summary should indicate residual quant status."""
+        cache_rq = GenerationCache(use_residual_quant=True)
+        cache_no_rq = GenerationCache(use_residual_quant=False)
+        keys, values = make_kv_states(seq_len=5)
+        cache_rq.update(keys, values, layer_idx=0)
+        cache_no_rq.update(keys, values, layer_idx=0)
+
+        assert "residual signs" in cache_rq.config_summary()
+        assert "no residual signs" in cache_no_rq.config_summary()

@@ -202,6 +202,7 @@ def build_cache(config: Dict):
     val_bits = config["val_bits"]
     fp16_window = config["fp16_window"]
     anchor_interval = config["anchor_interval"]
+    use_residual_quant = config.get("use_residual_quant", True)
 
     cache = GenerationCache(
         key_bits=key_bits,
@@ -209,6 +210,7 @@ def build_cache(config: Dict):
         fp16_window=fp16_window,
         anchor_interval=anchor_interval,
         seed=42,
+        use_residual_quant=use_residual_quant,
     )
     return cache
 

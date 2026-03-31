@@ -55,6 +55,9 @@ class _CompressedLayer:
         val_bits: Bits for value quantization (typically 2).
         fp16_window: Number of recent tokens stored at FP16.
         seed: Random seed for this layer's rotation matrix.
+        use_residual_quant: Whether to apply 1-bit residual sign correction
+            to keys during dequantization. When False, only the MSE centroid
+            reconstruction is used (no residual correction).
     """
 
     def __init__(
@@ -64,12 +67,14 @@ class _CompressedLayer:
         fp16_window: int = 128,
         seed: int = 42,
         use_norm_correction: bool = True,
+        use_residual_quant: bool = True,
     ):
         self.key_bits = key_bits
         self.val_bits = val_bits
         self.fp16_window = fp16_window
         self.seed = seed
         self.use_norm_correction = use_norm_correction
+        self.use_residual_quant = use_residual_quant
 
         self._seq_len: int = 0
 
@@ -320,7 +325,8 @@ class _CompressedLayer:
                 # norm-corrected fused path that avoids intermediate rounding.
                 new_keys = self._dequantize_vectors_fused(
                     new_k_idx, new_k_norms, self._key_codebook,
-                    new_k_rsigns, new_k_rscales,
+                    new_k_rsigns if self.use_residual_quant else None,
+                    new_k_rscales if self.use_residual_quant else None,
                 )
                 new_values = self._dequantize_vectors(
                     new_v_idx, new_v_norms, self._val_codebook,
@@ -638,6 +644,9 @@ class GenerationCache:
         use_norm_correction: Apply norm correction (original/reconstruction
             ratio) for improved perplexity. Default True per fused_attention
             finding of -1.17% perplexity improvement.
+        use_residual_quant: Whether to apply 1-bit residual sign correction
+            to keys during dequantization. When False, only MSE centroid
+            reconstruction is used. Default: True.
     """
 
     is_compileable = False
@@ -650,6 +659,7 @@ class GenerationCache:
         anchor_interval: int = 6,
         seed: int = 42,
         use_norm_correction: bool = True,
+        use_residual_quant: bool = True,
     ):
         if not (1 <= key_bits <= 8):
             raise ValueError(f"key_bits must be 1-8, got {key_bits}")
@@ -664,6 +674,7 @@ class GenerationCache:
         self.anchor_interval = anchor_interval
         self.seed = seed
         self.use_norm_correction = use_norm_correction
+        self.use_residual_quant = use_residual_quant
         self._layers: List[_CompressedLayer | _FP16Layer] = []
 
     def _is_anchor_layer(self, idx: int) -> bool:
@@ -680,6 +691,7 @@ class GenerationCache:
             fp16_window=self.fp16_window,
             seed=self.seed + idx,
             use_norm_correction=self.use_norm_correction,
+            use_residual_quant=self.use_residual_quant,
         )
 
     # ---- HF Cache protocol ----
@@ -883,6 +895,7 @@ class GenerationCache:
                 "val_bits": self.val_bits,
                 "fp16_window": self.fp16_window,
                 "anchor_interval": self.anchor_interval,
+                "use_residual_quant": self.use_residual_quant,
             },
             "num_layers": len(self._layers),
         }
@@ -891,8 +904,9 @@ class GenerationCache:
         """Return a human-readable configuration summary."""
         n_layers = len(self._layers)
         n_anchor = sum(1 for i in range(n_layers) if self._is_anchor_layer(i))
+        rq_desc = "+ 1b residual signs" if self.use_residual_quant else "(no residual signs)"
         return (
-            f"GenerationCache: {self.key_bits}b keys + 1b residual signs, "
+            f"GenerationCache: {self.key_bits}b keys {rq_desc}, "
             f"{self.val_bits}b values, FP16 window={self.fp16_window}, "
             f"{n_anchor}/{n_layers} anchor layers"
         )
