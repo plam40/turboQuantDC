@@ -50,6 +50,12 @@ from .asymmetric import (
     analyze_kv_norms,
 )
 from .generation_cache import GenerationCache
+from .channel_adaptive import (
+    ChannelAdaptiveCache,
+    ChannelAdaptivePolarQuant,
+    analyze_channel_sensitivity,
+    get_channel_priority,
+)
 
 __all__ = [
     # Codebook
@@ -111,6 +117,11 @@ __all__ = [
     "analyze_kv_norms",
     # Production Generation Cache
     "GenerationCache",
+    # Channel-Adaptive Mixed Precision
+    "ChannelAdaptiveCache",
+    "ChannelAdaptivePolarQuant",
+    "analyze_channel_sensitivity",
+    "get_channel_priority",
 ]
 
 __version__ = "0.2.0"
