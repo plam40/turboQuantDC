@@ -589,13 +589,22 @@ def run_attention_comparison(model, tokenizer, bits_list: List[int]) -> Dict[int
 
             cache = outputs.past_key_values
 
-            # Get keys from cache
-            if hasattr(cache, "key_cache"):
-                key_getter = lambda li: cache.key_cache[li]
-                n_layers = len(cache.key_cache)
+            # Get keys from cache -- handle DynamicCache variants
+            if hasattr(cache, "layers") and hasattr(cache.layers[0], "keys"):
+                # Newer DynamicCache with DynamicLayer objects
+                _cache_layers = cache.layers
+                key_getter = lambda li: _cache_layers[li].keys
+                n_layers = len(_cache_layers)
+            elif hasattr(cache, "key_cache"):
+                # Older DynamicCache with key_cache list
+                _key_cache = cache.key_cache
+                key_getter = lambda li: _key_cache[li]
+                n_layers = len(_key_cache)
             else:
-                key_getter = lambda li: cache[li][0]
-                n_layers = len(cache)
+                # Legacy tuple-of-tuples or iterable
+                _cache_list = list(cache)
+                key_getter = lambda li: _cache_list[li][0]
+                n_layers = len(_cache_list)
 
             sample = key_getter(0)
             n_kv_heads = sample.shape[1]
