@@ -82,3 +82,4 @@ outputs/
 
 # Hugging Face cache (don't commit model weights)
 .cache/
+docs/PATH_TO_100M.md
