@@ -357,8 +357,8 @@ class TurboQuantCache:
     is_compileable = False
 
     def __init__(self, bits: int = 3, seed: int = 42, mse_only: bool = False):
-        if bits not in (2, 3, 4):
-            raise ValueError(f"bits must be 2, 3, or 4, got {bits}")
+        if not (2 <= bits <= 8):
+            raise ValueError(f"bits must be between 2 and 8, got {bits}")
         self.bits = bits
         self.seed = seed
         self.mse_only = mse_only  # Skip QJL, use full b-bit MSE for keys
