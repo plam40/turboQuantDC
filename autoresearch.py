@@ -255,6 +255,16 @@ def score_config(
     per_prompt = []
     total_score = 0.0
 
+    # Filler prefix so total context exceeds any FP16 window size.
+    # Without this, configs with fp16_window=128 keep ALL tokens at FP16
+    # and score perfectly without actually compressing anything.
+    filler = (
+        "The quarterly report showed steady growth across divisions. "
+        "Revenue increased moderately while operating costs remained stable. "
+        "The research team achieved promising results in efficiency studies. "
+        "Customer satisfaction scores improved over the previous quarter. "
+    ) * 20  # ~400 tokens of filler
+
     for prompt_cfg in TEST_PROMPTS:
         # Build a fresh cache for each prompt (autoregressive generation
         # accumulates state, so each prompt needs its own cache instance)
@@ -263,9 +273,12 @@ def score_config(
         else:
             prompt_cache = build_cache(config)
 
+        # Prepend filler so FP16 window configs actually compress older tokens
+        full_prompt = filler + "\n\n" + prompt_cfg["prompt"]
+
         try:
             response = generate_with_cache(
-                model, tokenizer, prompt_cfg["prompt"], cache=prompt_cache,
+                model, tokenizer, full_prompt, cache=prompt_cache,
             )
         except Exception as e:
             response = f"[ERROR: {e}]"
