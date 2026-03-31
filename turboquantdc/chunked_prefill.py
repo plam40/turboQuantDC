@@ -171,17 +171,37 @@ class ChunkedPrefillEngine:
             start_tok = chunk_idx * self.chunk_size
             end_tok = min(start_tok + self.chunk_size, total_tokens)
             chunk_ids = input_ids[start_tok:end_tok].unsqueeze(0).to(self.device)
+            chunk_len = end_tok - start_tok
+
+            # Build explicit position_ids and attention_mask so the model
+            # sees positions and mask identical to what HF generate() would
+            # construct.  Without these, the causal mask may use stale or
+            # default values, which degrades attention at longer contexts.
+            past_seen = self.cache.get_seq_length(0) if self.cache.is_initialized else 0
+            cache_position = torch.arange(
+                past_seen, past_seen + chunk_len, device=self.device,
+            )
+            position_ids = cache_position.unsqueeze(0)  # (1, chunk_len)
+
+            # 2-D attention mask: ones for all positions the model should
+            # attend to (past compressed KV + current chunk).
+            attention_mask = torch.ones(
+                (1, past_seen + chunk_len),
+                dtype=torch.long,
+                device=self.device,
+            )
 
             # Forward pass -- the model's attention layers call
             # cache.update(key_states, value_states, layer_idx, cache_kwargs)
             # internally, which compresses and stores the new KV entries.
-            # HuggingFace infers position_ids from the cache length, so
-            # positions are correct automatically.
             with torch.no_grad():
                 _outputs = self.model(
                     input_ids=chunk_ids,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
                     past_key_values=self.cache,
                     use_cache=True,
+                    cache_position=cache_position,
                 )
 
             self._total_tokens_processed += (end_tok - start_tok)
@@ -239,17 +259,38 @@ class ChunkedPrefillEngine:
 
         gen_start = time.time()
 
+        # Helper: build position_ids, cache_position, and attention_mask
+        # for a forward call, mirroring what HF generate() does internally.
+        def _build_forward_args(new_seq_len: int):
+            past_seen = self.cache.get_seq_length(0)
+            cache_position = torch.arange(
+                past_seen, past_seen + new_seq_len, device=self.device,
+            )
+            position_ids = cache_position.unsqueeze(0)
+            attention_mask = torch.ones(
+                (1, past_seen + new_seq_len),
+                dtype=torch.long,
+                device=self.device,
+            )
+            return {
+                "attention_mask": attention_mask,
+                "position_ids": position_ids,
+                "cache_position": cache_position,
+            }
+
         # If there is a suffix prompt, process it through the model first
         # so that its KV entries are added to the cache.
         if prompt_suffix:
             suffix_ids = self.tokenizer.encode(
                 prompt_suffix, return_tensors="pt",
             ).to(self.device)
+            fwd_args = _build_forward_args(suffix_ids.shape[1])
             with torch.no_grad():
                 outputs = self.model(
                     input_ids=suffix_ids,
                     past_key_values=self.cache,
                     use_cache=True,
+                    **fwd_args,
                 )
             # Grab logits for the last position to start generation
             next_logits = outputs.logits[:, -1, :]
@@ -263,11 +304,13 @@ class ChunkedPrefillEngine:
             last_token_id = torch.tensor(
                 [[self.tokenizer.eos_token_id]], device=self.device,
             )
+            fwd_args = _build_forward_args(1)
             with torch.no_grad():
                 outputs = self.model(
                     input_ids=last_token_id,
                     past_key_values=self.cache,
                     use_cache=True,
+                    **fwd_args,
                 )
             next_logits = outputs.logits[:, -1, :]
             del outputs
@@ -288,11 +331,13 @@ class ChunkedPrefillEngine:
 
             # Run the new token through the model (adds to cache)
             token_input = next_token_id.view(1, 1)  # (batch=1, seq=1)
+            fwd_args = _build_forward_args(1)
             with torch.no_grad():
                 outputs = self.model(
                     input_ids=token_input,
                     past_key_values=self.cache,
                     use_cache=True,
+                    **fwd_args,
                 )
             next_logits = outputs.logits[:, -1, :]
             del outputs
