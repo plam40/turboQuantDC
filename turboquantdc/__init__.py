@@ -33,6 +33,12 @@ from .layer_adaptive import FP16Cache, LayerAdaptiveKVCache, estimate_memory, re
 from .temporal_decay import TemporalDecayCache
 from .hf_integration import TurboQuantCache
 from .custom_attention import turboquant_attention, patch_model_attention
+from .fused_attention import (
+    fused_turboquant_attention,
+    fused_mse_attention,
+    compute_norm_correction,
+    patch_model_fused_attention,
+)
 from .streaming import StreamingInferenceEngine
 from .chunked_prefill import ChunkedPrefillEngine
 from .asymmetric import (
@@ -82,6 +88,11 @@ __all__ = [
     # Custom Attention (unbiased inner products)
     "turboquant_attention",
     "patch_model_attention",
+    # Fused Attention (compute IP directly from compressed indices)
+    "fused_turboquant_attention",
+    "fused_mse_attention",
+    "compute_norm_correction",
+    "patch_model_fused_attention",
     # vLLM Integration
     "TurboQuantAttentionBackend",
     "TurboQuantCacheManager",
