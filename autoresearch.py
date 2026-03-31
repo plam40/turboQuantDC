@@ -58,7 +58,7 @@ SEARCH_SPACE = {
     "val_bits": [2, 3, 4],
     "anchor_interval": [0, 6, 12, 18, 36],
     "fp16_window": [0, 64, 128, 256],
-    "use_residual_quant": [True, False],
+    "use_residual_quant": [True],
     "mse_only": [True],
 }
 
@@ -196,21 +196,18 @@ def build_cache(config: Dict):
     Uses UltimateCache which handles all combinations:
     anchor layers, residual quant, asymmetric K/V, FP16 windowing.
     """
-    from turboquantdc.ultimate_cache import UltimateCache
+    from turboquantdc.generation_cache import GenerationCache
 
-    anchor_interval = config["anchor_interval"]
     key_bits = config["key_bits"]
     val_bits = config["val_bits"]
     fp16_window = config["fp16_window"]
-    use_residual_quant = config["use_residual_quant"]
+    anchor_interval = config["anchor_interval"]
 
-    cache = UltimateCache(
-        num_layers=NUM_LAYERS,
+    cache = GenerationCache(
         key_bits=key_bits,
         val_bits=val_bits,
-        anchor_interval=anchor_interval,
         fp16_window=fp16_window,
-        use_residual_quant=use_residual_quant,
+        anchor_interval=anchor_interval,
         seed=42,
     )
     return cache
