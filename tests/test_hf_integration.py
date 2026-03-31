@@ -183,9 +183,9 @@ class TestBitsParameter:
         assert cache.get_seq_length(0) == 4
 
     def test_invalid_bits(self):
-        """Bits outside {2, 3, 4} should raise ValueError."""
+        """Bits outside 2-8 should raise ValueError."""
         with pytest.raises(ValueError, match="bits must be"):
-            TurboQuantCache(bits=5)
+            TurboQuantCache(bits=9)
         with pytest.raises(ValueError, match="bits must be"):
             TurboQuantCache(bits=1)
 
