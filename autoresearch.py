@@ -14,15 +14,18 @@ The search space covers:
     mse_only: [True]  (QJL is dead; always MSE-only)
 = 600 total configurations
 
-Scoring uses 8 test prompts covering factual recall, math, code, and
-reasoning.  Each prompt is scored 0-1 on factual accuracy (0.6 weight),
-coherence/repetition (0.3 weight), and length sanity (0.1 weight).
+Scoring (v2 -- perplexity + generation quality):
+    Primary:   Wikitext-2 perplexity vs FP16 baseline (0.6 weight)
+    Secondary: 12-prompt generation quality via self-judge comparison (0.4 weight)
+    Combined:  0.6 * ppl_score + 0.4 * gen_score
+    Legacy keyword-matching score preserved as ``legacy_score`` for comparison.
 
 Usage:
     cd /home/dhawal/turboQuantDC
     python autoresearch.py                          # 600 rounds
     python autoresearch.py --max-rounds 200         # first 200 (most promising)
     python autoresearch.py --resume                 # skip already-tested configs
+    python autoresearch.py --skip-needle            # skip needle-in-haystack (faster)
     nohup python autoresearch.py > autoresearch.log 2>&1 &
 """
 
@@ -62,84 +65,7 @@ SEARCH_SPACE = {
     "mse_only": [True],
 }
 
-TEST_PROMPTS = [
-    {
-        "prompt": "What is the capital of Australia? Answer with just the city name:",
-        "expected": ["Canberra"],
-        "type": "factual",
-    },
-    {
-        "prompt": "What is 15 + 27? Answer with just the number:",
-        "expected": ["42"],
-        "type": "math",
-    },
-    {
-        "prompt": "Who wrote the novel 1984? Answer briefly:",
-        "expected": ["George Orwell", "Orwell"],
-        "type": "factual",
-    },
-    {
-        "prompt": "What is the largest planet in our solar system? Answer briefly:",
-        "expected": ["Jupiter"],
-        "type": "factual",
-    },
-    {
-        "prompt": "Write a Python function that returns the factorial of n:",
-        "expected": ["def ", "factorial", "return"],
-        "type": "code",
-    },
-    {
-        "prompt": "Explain photosynthesis in one sentence:",
-        "expected": ["light", "energy", "plant"],
-        "type": "reasoning",
-    },
-    {
-        "prompt": "What is the chemical formula for water?",
-        "expected": ["H2O"],
-        "type": "factual",
-    },
-    {
-        "prompt": "List three primary colors:",
-        "expected": ["red", "blue"],
-        "type": "factual",
-    },
-]
-
-
-# ---------------------------------------------------------------------------
-# Scoring
-# ---------------------------------------------------------------------------
-
-def score_response(prompt_config: Dict, response: str) -> float:
-    """Score a single response from 0 to 1.
-
-    Checks:
-    1. Factual accuracy (0.6 weight): does the response contain expected keywords?
-    2. Coherence (0.3 weight): is it free of degenerate repetition?
-    3. Length (0.1 weight): is it a reasonable length?
-    """
-    score = 0.0
-
-    # Factual accuracy (0.6 weight)
-    expected = prompt_config["expected"]
-    found = sum(1 for e in expected if e.lower() in response.lower())
-    accuracy = found / len(expected)
-    score += 0.6 * accuracy
-
-    # Coherence (0.3 weight) -- penalize repetition
-    words = response.split()
-    if len(words) > 5:
-        unique_ratio = len(set(w.lower() for w in words)) / len(words)
-        coherence = min(unique_ratio / 0.5, 1.0)  # 50%+ unique words = full marks
-    else:
-        coherence = 0.5  # Short responses are OK but not great
-    score += 0.3 * coherence
-
-    # Length (0.1 weight) -- penalize empty or extremely long
-    if 3 < len(words) < 200:
-        score += 0.1
-
-    return round(score, 4)
+from benchmark import BenchmarkRunner, GENERATION_PROMPTS, score_response_legacy
 
 
 def compute_compression_ratio(config: Dict) -> float:
@@ -216,93 +142,32 @@ def build_cache(config: Dict):
 
 
 # ---------------------------------------------------------------------------
-# Generation
+# Score a full configuration (via benchmark module)
 # ---------------------------------------------------------------------------
 
-def generate_with_cache(model, tokenizer, prompt: str, cache=None) -> str:
-    """Generate text with optional KV cache."""
-    inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
-    with torch.no_grad():
-        kwargs = dict(
-            **inputs,
-            max_new_tokens=MAX_NEW_TOKENS,
-            do_sample=DO_SAMPLE,
-        )
-        if cache is not None:
-            kwargs["past_key_values"] = cache
-        out = model.generate(**kwargs)
-
-    response = tokenizer.decode(
-        out[0][inputs.input_ids.shape[1]:],
-        skip_special_tokens=True,
-    )
-    return response
-
-
-# ---------------------------------------------------------------------------
-# Score a full configuration
-# ---------------------------------------------------------------------------
-
-def score_config(
-    model, tokenizer, config: Dict, cache=None, is_baseline: bool = False,
-) -> Tuple[float, List[Dict], float]:
-    """Score a full configuration across all test prompts.
+def score_config_v2(
+    benchmark_runner: BenchmarkRunner,
+    config: Dict,
+    baseline_ppl: float,
+    baseline_responses: Optional[Dict[str, str]] = None,
+    run_needle: bool = True,
+) -> Tuple[Dict[str, Any], float]:
+    """Score a config using the benchmark module.
 
     Returns:
-        (total_score, per_prompt_details, compression_ratio)
+        (result_dict, compression_ratio) where result_dict is serializable
+        and contains total_score, ppl_score, gen_score, legacy_score, per_prompt, etc.
     """
-    per_prompt = []
-    total_score = 0.0
+    result = benchmark_runner.evaluate_config(
+        config=config,
+        build_cache_fn=build_cache,
+        baseline_ppl=baseline_ppl,
+        baseline_responses=baseline_responses,
+        run_needle=run_needle,
+    )
 
-    # Filler prefix so total context exceeds any FP16 window size.
-    # Without this, configs with fp16_window=128 keep ALL tokens at FP16
-    # and score perfectly without actually compressing anything.
-    filler = (
-        "The quarterly report showed steady growth across divisions. "
-        "Revenue increased moderately while operating costs remained stable. "
-        "The research team achieved promising results in efficiency studies. "
-        "Customer satisfaction scores improved over the previous quarter. "
-    ) * 20  # ~400 tokens of filler
-
-    for prompt_cfg in TEST_PROMPTS:
-        # Build a fresh cache for each prompt (autoregressive generation
-        # accumulates state, so each prompt needs its own cache instance)
-        if is_baseline:
-            prompt_cache = None
-        else:
-            prompt_cache = build_cache(config)
-
-        # Prepend filler so FP16 window configs actually compress older tokens
-        full_prompt = filler + "\n\n" + prompt_cfg["prompt"]
-
-        try:
-            response = generate_with_cache(
-                model, tokenizer, full_prompt, cache=prompt_cache,
-            )
-        except Exception as e:
-            response = f"[ERROR: {e}]"
-
-        s = score_response(prompt_cfg, response)
-        total_score += s
-
-        per_prompt.append({
-            "prompt": prompt_cfg["prompt"],
-            "type": prompt_cfg["type"],
-            "response": response[:300],
-            "score": s,
-        })
-
-        del prompt_cache
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-    # Normalize to 0-1
-    total_score = round(total_score / len(TEST_PROMPTS), 4)
-
-    compression = compute_compression_ratio(config) if not is_baseline else 1.0
-
-    return total_score, per_prompt, compression
+    compression = compute_compression_ratio(config)
+    return result.to_dict(), compression
 
 
 # ---------------------------------------------------------------------------
@@ -476,7 +341,12 @@ def print_final_summary(results_file: str):
 
     if baseline:
         b = baseline[0]
-        print(f"\nFP16 Baseline score: {b['total_score']:.4f}")
+        ppl_info = ""
+        if "ppl_score" in b:
+            ppl_info = f"  (ppl={b.get('ppl_score', 0):.4f}, gen={b.get('gen_score', 0):.4f})"
+        print(f"\nFP16 Baseline score: {b['total_score']:.4f}{ppl_info}")
+        if "baseline_ppl" in b:
+            print(f"FP16 Baseline perplexity: {b['baseline_ppl']:.2f}")
 
     print(f"\nTotal configurations tested: {len(configs)}")
 
@@ -484,15 +354,17 @@ def print_final_summary(results_file: str):
     print(f"\n{'='*80}")
     print("TOP 20 BY QUALITY SCORE")
     print(f"{'='*80}")
-    print(f"{'#':>3}  {'Score':>6}  {'Comp':>6}  {'K':>2}b  {'V':>2}b  {'Anchor':>6}  {'Window':>6}  {'ResQ':>4}  {'Time':>6}")
-    print("-" * 70)
+    print(f"{'#':>3}  {'Score':>6}  {'PPL':>5}  {'Gen':>5}  {'PPL+%':>6}  {'Comp':>6}  {'K':>2}b  {'V':>2}b  {'Anchor':>6}  {'Window':>6}  {'ResQ':>4}")
+    print("-" * 85)
     for i, r in enumerate(configs[:20]):
         c = r["config"]
+        ppl_s = f"{r.get('ppl_score', 0):>5.3f}" if "ppl_score" in r else "  n/a"
+        gen_s = f"{r.get('gen_score', 0):>5.3f}" if "gen_score" in r else "  n/a"
+        ppl_pct = f"{r.get('ppl_increase_pct', 0):>5.1f}%" if "ppl_increase_pct" in r else "   n/a"
         print(
-            f"{i+1:>3}  {r['total_score']:>6.4f}  {r['compression']:>5.2f}x  "
+            f"{i+1:>3}  {r['total_score']:>6.4f}  {ppl_s}  {gen_s}  {ppl_pct}  {r['compression']:>5.2f}x  "
             f"{c['key_bits']:>2}   {c['val_bits']:>2}   {c['anchor_interval']:>6}  "
-            f"{c['fp16_window']:>6}  {str(c['use_residual_quant']):>5}  "
-            f"{r['elapsed_s']:>5.1f}s"
+            f"{c['fp16_window']:>6}  {str(c['use_residual_quant']):>5}"
         )
 
     # Top 20 by compression (among configs scoring >= 0.7)
@@ -502,12 +374,14 @@ def print_final_summary(results_file: str):
     print(f"\n{'='*80}")
     print("TOP 20 BY COMPRESSION (score >= 0.7)")
     print(f"{'='*80}")
-    print(f"{'#':>3}  {'Score':>6}  {'Comp':>6}  {'K':>2}b  {'V':>2}b  {'Anchor':>6}  {'Window':>6}  {'ResQ':>4}")
-    print("-" * 65)
+    print(f"{'#':>3}  {'Score':>6}  {'PPL':>5}  {'Gen':>5}  {'Comp':>6}  {'K':>2}b  {'V':>2}b  {'Anchor':>6}  {'Window':>6}  {'ResQ':>4}")
+    print("-" * 75)
     for i, r in enumerate(good_configs[:20]):
         c = r["config"]
+        ppl_s = f"{r.get('ppl_score', 0):>5.3f}" if "ppl_score" in r else "  n/a"
+        gen_s = f"{r.get('gen_score', 0):>5.3f}" if "gen_score" in r else "  n/a"
         print(
-            f"{i+1:>3}  {r['total_score']:>6.4f}  {r['compression']:>5.2f}x  "
+            f"{i+1:>3}  {r['total_score']:>6.4f}  {ppl_s}  {gen_s}  {r['compression']:>5.2f}x  "
             f"{c['key_bits']:>2}   {c['val_bits']:>2}   {c['anchor_interval']:>6}  "
             f"{c['fp16_window']:>6}  {str(c['use_residual_quant']):>5}"
         )
@@ -563,11 +437,20 @@ def run_autoresearch(
     max_rounds: int = 600,
     results_file: str = "autoresearch_results.jsonl",
     resume: bool = False,
+    skip_needle: bool = False,
 ):
     """Run the autoresearch loop.
 
-    Sweeps configurations in priority order, scores each, and saves results
-    incrementally to JSONL file.
+    Sweeps configurations in priority order, scores each using perplexity +
+    generation quality, and saves results incrementally to JSONL file.
+
+    Args:
+        model: Loaded HuggingFace model.
+        tokenizer: Loaded HuggingFace tokenizer.
+        max_rounds: Max configurations to test.
+        results_file: JSONL output path.
+        resume: Skip already-tested configurations.
+        skip_needle: Skip needle-in-haystack evaluation (faster).
     """
     all_configs = generate_config_list()
 
@@ -589,9 +472,25 @@ def run_autoresearch(
         print("No configurations to test. All done!")
         return
 
-    print(f"\nAutoresearch: testing {total_configs} configurations")
+    print(f"\nAutoresearch v2: testing {total_configs} configurations")
     print(f"Results file: {results_file}")
-    print(f"Estimated time: {total_configs * 30 / 60:.0f}-{total_configs * 60 / 60:.0f} minutes")
+    print(f"Scoring: 60% perplexity + 40% generation quality")
+    print(f"Needle-in-haystack: {'SKIP' if skip_needle else 'ON'}")
+    print(f"Estimated time: {total_configs * 60 / 60:.0f}-{total_configs * 120 / 60:.0f} minutes")
+    print()
+
+    # Initialize benchmark runner
+    benchmark_runner = BenchmarkRunner(model, tokenizer)
+
+    # Compute FP16 baseline perplexity ONCE
+    print("Computing FP16 baseline perplexity...")
+    baseline_ppl = benchmark_runner.compute_model_perplexity(cache=None)
+    print(f"FP16 baseline perplexity: {baseline_ppl:.2f}")
+
+    # Compute FP16 baseline responses for self-judge comparison
+    print("Computing FP16 baseline generation responses...")
+    baseline_responses = benchmark_runner.compute_baseline_responses()
+    print(f"Baseline responses computed for {len(baseline_responses)} prompts")
     print()
 
     best_score = 0.0
@@ -625,9 +524,14 @@ def run_autoresearch(
         start_time = time.time()
 
         try:
-            total_score, per_prompt, compression = score_config(
-                model, tokenizer, config, is_baseline=False,
+            result_dict, compression = score_config_v2(
+                benchmark_runner,
+                config,
+                baseline_ppl=baseline_ppl,
+                baseline_responses=baseline_responses,
+                run_needle=not skip_needle,
             )
+            total_score = result_dict["total_score"]
         except Exception as e:
             # Don't let one bad config kill the loop
             elapsed = time.time() - start_time
@@ -636,6 +540,9 @@ def run_autoresearch(
                 "config": config,
                 "config_key": config_key(config),
                 "total_score": 0.0,
+                "ppl_score": 0.0,
+                "gen_score": 0.0,
+                "legacy_score": 0.0,
                 "per_prompt": [],
                 "compression": compute_compression_ratio(config),
                 "elapsed_s": round(elapsed, 2),
@@ -662,20 +569,18 @@ def run_autoresearch(
         elapsed = time.time() - start_time
         cumulative_time += elapsed
 
-        # Log result
-        result = {
+        # Log result -- merge benchmark result with config metadata
+        log_entry = {
             "round": round_num,
             "config": config,
             "config_key": config_key(config),
-            "total_score": total_score,
-            "per_prompt": per_prompt,
             "compression": compression,
-            "elapsed_s": round(elapsed, 2),
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            **result_dict,
         }
 
         with open(results_file, "a") as f:
-            f.write(json.dumps(result) + "\n")
+            f.write(json.dumps(log_entry) + "\n")
 
         # Track best
         is_new_best = total_score > best_score
@@ -687,6 +592,7 @@ def run_autoresearch(
         pareto_frontier = update_pareto(pareto_frontier, compression, total_score)
 
         # Progress indicator
+        ppl_pct = result_dict.get("ppl_increase_pct", 0)
         if total_score >= 0.8:
             stars = "**"
         elif total_score >= 0.5:
@@ -702,6 +608,9 @@ def run_autoresearch(
         print(
             f"[{round_num+1}/{total_configs}] {stars} "
             f"score={total_score:.4f}  "
+            f"ppl={result_dict.get('ppl_score', 0):.3f}  "
+            f"gen={result_dict.get('gen_score', 0):.3f}  "
+            f"ppl+{ppl_pct:.1f}%  "
             f"comp={compression:.2f}x  "
             f"k={config['key_bits']}b v={config['val_bits']}b  "
             f"anchor={config['anchor_interval']}  "
@@ -764,6 +673,10 @@ def main():
         "--summary-only", action="store_true",
         help="Just print the summary from an existing results file, don't run",
     )
+    parser.add_argument(
+        "--skip-needle", action="store_true",
+        help="Skip needle-in-haystack evaluation (faster per round)",
+    )
     args = parser.parse_args()
 
     results_path = os.path.join(REPO_ROOT, args.results_file)
@@ -785,32 +698,37 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     print(f"Model loaded on {next(model.parameters()).device}")
 
-    # Run FP16 baseline for comparison
-    print("\n--- FP16 BASELINE ---")
-    baseline_config = {"baseline": True, "key_bits": 16, "val_bits": 16, "anchor_interval": 0, "fp16_window": 0, "use_residual_quant": False, "mse_only": True}
-    baseline_score, baseline_prompts, _ = score_config(
-        model, tokenizer, baseline_config, is_baseline=True,
-    )
-    print(f"FP16 baseline score: {baseline_score:.4f}")
-    for p in baseline_prompts:
-        print(f"  [{p['type']:>10}] {p['score']:.2f}  {p['response'][:80]}")
+    # Run FP16 baseline using benchmark runner
+    print("\n--- FP16 BASELINE (v2: perplexity + generation quality) ---")
+    benchmark_runner = BenchmarkRunner(model, tokenizer)
+    baseline_result_obj = benchmark_runner.evaluate_baseline()
+
+    print(f"FP16 baseline perplexity: {baseline_result_obj.baseline_ppl:.2f}")
+    print(f"FP16 baseline total score: {baseline_result_obj.total_score:.4f}")
+    print(f"FP16 baseline legacy score: {baseline_result_obj.legacy_score:.4f}")
+    print(f"FP16 needle score: {baseline_result_obj.needle_score:.4f}")
+    for p in baseline_result_obj.per_prompt:
+        print(f"  [{p['type']:>12}] legacy={p.get('legacy_score', 0):.2f}  {p['response'][:80]}")
 
     # Save baseline
-    baseline_result = {
+    baseline_config = {
+        "baseline": True, "key_bits": 16, "val_bits": 16,
+        "anchor_interval": 0, "fp16_window": 0,
+        "use_residual_quant": False, "mse_only": True,
+    }
+    baseline_entry = {
         "round": -1,
         "config": baseline_config,
         "config_key": "fp16_baseline",
-        "total_score": baseline_score,
-        "per_prompt": baseline_prompts,
         "compression": 1.0,
-        "elapsed_s": 0,
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        **baseline_result_obj.to_dict(),
     }
 
     # Only write baseline if not resuming or if file doesn't exist
     if not args.resume or not os.path.exists(results_path):
         with open(results_path, "a") as f:
-            f.write(json.dumps(baseline_result) + "\n")
+            f.write(json.dumps(baseline_entry) + "\n")
 
     print()
 
@@ -820,6 +738,7 @@ def main():
         max_rounds=args.max_rounds,
         results_file=results_path,
         resume=args.resume,
+        skip_needle=args.skip_needle,
     )
 
 

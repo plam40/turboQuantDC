@@ -83,7 +83,7 @@ tr:hover { background: #1a1a2e; }
     <table id="resultsTable">
       <thead>
         <tr>
-          <th>#</th><th>Score</th><th>Compression</th><th>K bits</th><th>V bits</th>
+          <th>#</th><th>Score</th><th>PPL</th><th>Gen</th><th>Compression</th><th>K bits</th><th>V bits</th>
           <th>Anchors</th><th>Window</th><th>ResQ</th><th>Quality</th>
         </tr>
       </thead>
@@ -129,14 +129,19 @@ function updateDashboard() {
     `<div><span class="key">Anchor interval:</span> <span class="val">${c.anchor_interval || 'none'}</span></div>` +
     `<div><span class="key">FP16 window:</span> <span class="val">${c.fp16_window || 0}</span></div>` +
     `<div><span class="key">ResidualQuant:</span> <span class="val">${c.use_residual_quant ? 'YES' : 'no'}</span></div>` +
-    `<div style="margin-top:10px"><span class="key">Score:</span> <span class="val">${(best.total_score * 100).toFixed(1)}%</span></div>` +
+    `<div style="margin-top:10px"><span class="key">Combined Score:</span> <span class="val">${(best.total_score * 100).toFixed(1)}%</span></div>` +
+    `<div><span class="key">PPL Score:</span> <span class="val">${best.ppl_score != null ? (best.ppl_score * 100).toFixed(1) + '%' : 'n/a'}</span></div>` +
+    `<div><span class="key">Gen Score:</span> <span class="val">${best.gen_score != null ? (best.gen_score * 100).toFixed(1) + '%' : 'n/a'}</span></div>` +
+    `<div><span class="key">PPL Increase:</span> <span class="val">${best.ppl_increase_pct != null ? best.ppl_increase_pct.toFixed(1) + '%' : 'n/a'}</span></div>` +
     `<div><span class="key">Compression:</span> <span class="val">${(best.compression || 0).toFixed(1)}x</span></div>`;
 
   // Log feed (last 10)
   const logLines = allResults.slice(-10).reverse().map(r => {
     const cfg = r.config || {};
     const star = r.total_score >= 0.8 ? '<span class="star">*</span>' : ' ';
-    return `${star} [${r.round}] score=${(r.total_score*100).toFixed(0)}% ` +
+    const ppl = r.ppl_score != null ? `ppl=${(r.ppl_score*100).toFixed(0)}%` : '';
+    const gen = r.gen_score != null ? `gen=${(r.gen_score*100).toFixed(0)}%` : '';
+    return `${star} [${r.round}] score=${(r.total_score*100).toFixed(0)}% ${ppl} ${gen} ` +
            `comp=${(r.compression||0).toFixed(1)}x ` +
            `k=${cfg.key_bits||'?'}b v=${cfg.val_bits||'?'}b ` +
            `anc=${cfg.anchor_interval||0} resq=${cfg.use_residual_quant?'Y':'N'}`;
@@ -151,9 +156,13 @@ function updateDashboard() {
     const pct = Math.round(r.total_score * 100);
     const cls = pct >= 80 ? 'good' : pct >= 50 ? 'ok' : 'bad';
     const isPareto = isParetoOptimal(r, allResults);
+    const pplPct = r.ppl_score != null ? Math.round(r.ppl_score * 100) + '%' : '-';
+    const genPct = r.gen_score != null ? Math.round(r.gen_score * 100) + '%' : '-';
     return `<tr>` +
       `<td>${r.round}</td>` +
       `<td>${isPareto ? '<span class="pareto">' : ''}${pct}%${isPareto ? ' P</span>' : ''}</td>` +
+      `<td>${pplPct}</td>` +
+      `<td>${genPct}</td>` +
       `<td>${(r.compression||0).toFixed(1)}x</td>` +
       `<td>${c.key_bits||'?'}</td><td>${c.val_bits||'?'}</td>` +
       `<td>${c.anchor_interval||'-'}</td><td>${c.fp16_window||'-'}</td>` +
