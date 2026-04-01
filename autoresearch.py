@@ -6,13 +6,16 @@ saves results after every round, and reports the Pareto frontier of
 compression vs generation quality.
 
 The search space covers:
-    key_bits: [3, 4, 5, 6, 8]
-    val_bits: [2, 3, 4]
-    anchor_interval: [0, 6, 12, 18, 36]
-    fp16_window: [0, 64, 128, 256]
-    use_residual_quant: [True, False]
-    mse_only: [True]  (QJL is dead; always MSE-only)
-= 600 total configurations
+    Uniform quantizer:
+        key_bits: [3, 4, 5, 6, 8]
+        val_bits: [2, 3, 4]
+        anchor_interval: [0, 6, 12, 18, 36]
+        fp16_window: [0, 64, 128, 256, 512]
+        use_residual_quant: [True, False]
+        mse_only: [True]  (QJL is dead; always MSE-only)
+    Channel-adaptive quantizer (KITTY-style mixed precision):
+        high_bits / low_bits replace key_bits (e.g. 4+2 = 2.5-bit avg)
+        boost_fraction: 0.25 (top 25% channels at high_bits)
 
 Scoring (v2 -- perplexity + generation quality):
     Primary:   Wikitext-2 perplexity vs FP16 baseline (0.6 weight)
@@ -22,7 +25,7 @@ Scoring (v2 -- perplexity + generation quality):
 
 Usage:
     cd /home/dhawal/turboQuantDC
-    python autoresearch.py                          # 600 rounds
+    python autoresearch.py                          # full sweep
     python autoresearch.py --max-rounds 200         # first 200 (most promising)
     python autoresearch.py --resume                 # skip already-tested configs
     python autoresearch.py --skip-needle            # skip needle-in-haystack (faster)
@@ -60,10 +63,18 @@ SEARCH_SPACE = {
     "key_bits": [3, 4, 5, 6, 8],
     "val_bits": [2, 3, 4],
     "anchor_interval": [0, 6, 12, 18, 36],
-    "fp16_window": [0, 64, 128, 256],
-    "use_residual_quant": [True],
+    "fp16_window": [0, 64, 128, 256, 512],
+    "use_residual_quant": [True, False],
     "mse_only": [True],
 }
+
+# Channel-adaptive configs: (high_bits, low_bits, val_bits) with boost_fraction=0.25
+ADAPTIVE_CONFIGS = [
+    {"high_bits": 4, "low_bits": 2, "val_bits": 2},   # 2.5-bit avg keys, 2-bit vals
+    {"high_bits": 4, "low_bits": 3, "val_bits": 2},   # 3.25-bit avg keys, 2-bit vals
+    {"high_bits": 4, "low_bits": 3, "val_bits": 3},   # 3.25-bit avg keys, 3-bit vals
+]
+ADAPTIVE_BOOST_FRACTION = 0.25
 
 from benchmark import BenchmarkRunner, GENERATION_PROMPTS, score_response_legacy
 
@@ -71,13 +82,24 @@ from benchmark import BenchmarkRunner, GENERATION_PROMPTS, score_response_legacy
 def compute_compression_ratio(config: Dict) -> float:
     """Compute theoretical compression ratio for a configuration.
 
+    Handles both uniform and channel-adaptive quantizer types.
     Uses the UltimateCache theoretical formula without storing any data.
     """
-    key_bits = config["key_bits"]
     val_bits = config["val_bits"]
-    anchor_interval = config["anchor_interval"]
     fp16_window = config["fp16_window"]
-    use_residual_quant = config["use_residual_quant"]
+
+    # Determine effective key bits
+    if config.get("quantizer_type") == "adaptive":
+        high_bits = config["high_bits"]
+        low_bits = config["low_bits"]
+        boost_fraction = config.get("boost_fraction", ADAPTIVE_BOOST_FRACTION)
+        eff_key_bits = boost_fraction * high_bits + (1 - boost_fraction) * low_bits
+        anchor_interval = 0  # adaptive configs don't use anchors
+        use_residual_quant = False
+    else:
+        eff_key_bits = config["key_bits"]
+        anchor_interval = config["anchor_interval"]
+        use_residual_quant = config["use_residual_quant"]
 
     if anchor_interval > 0 and anchor_interval < NUM_LAYERS:
         n_fp16 = len([i for i in range(NUM_LAYERS) if i % anchor_interval == 0])
@@ -90,9 +112,9 @@ def compute_compression_ratio(config: Dict) -> float:
 
     # Compressed layers
     if use_residual_quant:
-        comp_key = key_bits + 32 / 128.0  # MSE + signs + scale + norm overhead
+        comp_key = eff_key_bits + 32 / 128.0  # MSE + signs + scale + norm overhead
     else:
-        comp_key = key_bits + 16 / 128.0  # MSE + norm overhead
+        comp_key = eff_key_bits + 16 / 128.0  # MSE + norm overhead
 
     comp_val = val_bits + 16 / 128.0
     comp_cost = n_comp * (comp_key + comp_val)
@@ -119,9 +141,12 @@ def compute_compression_ratio(config: Dict) -> float:
 def build_cache(config: Dict):
     """Build the appropriate cache for a configuration.
 
-    Uses UltimateCache which handles all combinations:
-    anchor layers, residual quant, asymmetric K/V, FP16 windowing.
+    Dispatches to ChannelAdaptiveCache for adaptive configs, or
+    GenerationCache for uniform configs.
     """
+    if config.get("quantizer_type") == "adaptive":
+        return build_adaptive_cache(config)
+
     from turboquantdc.generation_cache import GenerationCache
 
     key_bits = config["key_bits"]
@@ -137,6 +162,25 @@ def build_cache(config: Dict):
         anchor_interval=anchor_interval,
         seed=42,
         use_residual_quant=use_residual_quant,
+    )
+    return cache
+
+
+def build_adaptive_cache(config: Dict):
+    """Build a ChannelAdaptiveCache for mixed-precision key quantization.
+
+    Uses KITTY-style channel sensitivity analysis to allocate more bits
+    to sensitive channels and fewer bits to the rest.
+    """
+    from turboquantdc.channel_adaptive import ChannelAdaptiveCache
+
+    cache = ChannelAdaptiveCache(
+        high_bits=config["high_bits"],
+        low_bits=config["low_bits"],
+        val_bits=config["val_bits"],
+        boost_fraction=config.get("boost_fraction", ADAPTIVE_BOOST_FRACTION),
+        fp16_window=config["fp16_window"],
+        seed=42,
     )
     return cache
 
@@ -176,6 +220,12 @@ def score_config_v2(
 
 def config_key(config: Dict) -> str:
     """Stable string key for a configuration (for dedup/resume)."""
+    if config.get("quantizer_type") == "adaptive":
+        return (
+            f"adaptive_h{config['high_bits']}_l{config['low_bits']}"
+            f"_v{config['val_bits']}"
+            f"_w{config['fp16_window']}"
+        )
     return (
         f"k{config['key_bits']}_v{config['val_bits']}"
         f"_a{config['anchor_interval']}"
@@ -188,9 +238,9 @@ def generate_config_list() -> List[Dict]:
     """Generate all configurations, priority-ordered.
 
     Strategy: most promising first, then systematic sweep.
-    Priority 1: known breakthroughs (from prior experiments)
-    Priority 2: combined stacks at moderate compression
-    Priority 3: full systematic sweep of remaining space
+    Priority 1: known breakthroughs + K8 near-lossless + adaptive
+    Priority 2: K8 combos + combined stacks at moderate compression + adaptive variants
+    Priority 3: full systematic sweep of remaining uniform space
     """
     seen = set()
     configs = []
@@ -201,34 +251,72 @@ def generate_config_list() -> List[Dict]:
             seen.add(key)
             configs.append(cfg)
 
-    # --- Priority 1: known good configs from prior experiments ---
-    # Anchor-12 + 4-bit keys + 4-bit values (known clean)
-    add({"key_bits": 4, "val_bits": 4, "anchor_interval": 12, "fp16_window": 0, "use_residual_quant": False, "mse_only": True})
-    # Anchor-12 + 4-bit keys + 2-bit values (known clean, higher compression)
-    add({"key_bits": 4, "val_bits": 2, "anchor_interval": 12, "fp16_window": 0, "use_residual_quant": False, "mse_only": True})
-    # Anchor-12 + ResQ-4 keys + 2-bit values
-    add({"key_bits": 4, "val_bits": 2, "anchor_interval": 12, "fp16_window": 0, "use_residual_quant": True, "mse_only": True})
-    # No anchors + ResQ-4 keys + 2-bit values (highest compression that may work)
-    add({"key_bits": 4, "val_bits": 2, "anchor_interval": 0, "fp16_window": 0, "use_residual_quant": True, "mse_only": True})
-    # Anchor-12 + 5-bit keys + 2-bit values
-    add({"key_bits": 5, "val_bits": 2, "anchor_interval": 12, "fp16_window": 0, "use_residual_quant": False, "mse_only": True})
-    # Windowed variants
-    add({"key_bits": 4, "val_bits": 2, "anchor_interval": 12, "fp16_window": 128, "use_residual_quant": True, "mse_only": True})
-    add({"key_bits": 4, "val_bits": 2, "anchor_interval": 12, "fp16_window": 64, "use_residual_quant": False, "mse_only": True})
-    # 3-bit keys (aggressive)
-    add({"key_bits": 3, "val_bits": 2, "anchor_interval": 12, "fp16_window": 0, "use_residual_quant": False, "mse_only": True})
-    add({"key_bits": 3, "val_bits": 2, "anchor_interval": 6, "fp16_window": 0, "use_residual_quant": False, "mse_only": True})
-    add({"key_bits": 3, "val_bits": 3, "anchor_interval": 6, "fp16_window": 0, "use_residual_quant": False, "mse_only": True})
-    add({"key_bits": 3, "val_bits": 2, "anchor_interval": 12, "fp16_window": 128, "use_residual_quant": True, "mse_only": True})
+    def uniform(kb, vb, ai, fw, rq):
+        """Shorthand for uniform config dict."""
+        return {"key_bits": kb, "val_bits": vb, "anchor_interval": ai, "fp16_window": fw, "use_residual_quant": rq, "mse_only": True}
 
-    # --- Priority 2: combined stacks at moderate compression ---
+    def adaptive(hb, lb, vb, fw):
+        """Shorthand for adaptive config dict."""
+        return {"quantizer_type": "adaptive", "high_bits": hb, "low_bits": lb, "val_bits": vb, "boost_fraction": ADAPTIVE_BOOST_FRACTION, "fp16_window": fw, "anchor_interval": 0, "use_residual_quant": False, "mse_only": True}
+
+    # --- Priority 1: known good configs + K8 near-lossless + adaptive ---
+    # Anchor-12 + 4-bit keys + 4-bit values (known clean)
+    add(uniform(4, 4, 12, 0, False))
+    # Anchor-12 + 4-bit keys + 2-bit values (known clean, higher compression)
+    add(uniform(4, 2, 12, 0, False))
+    # Anchor-12 + ResQ-4 keys + 2-bit values
+    add(uniform(4, 2, 12, 0, True))
+    # No anchors + ResQ-4 keys + 2-bit values (highest compression that may work)
+    add(uniform(4, 2, 0, 0, True))
+    # Anchor-12 + 5-bit keys + 2-bit values
+    add(uniform(5, 2, 12, 0, False))
+    # Windowed variants
+    add(uniform(4, 2, 12, 128, True))
+    add(uniform(4, 2, 12, 64, False))
+    # 3-bit keys (aggressive)
+    add(uniform(3, 2, 12, 0, False))
+    add(uniform(3, 2, 6, 0, False))
+    add(uniform(3, 3, 6, 0, False))
+    add(uniform(3, 2, 12, 128, True))
+    # K8 near-lossless: 8-bit keys should be near-FP16 quality for keys,
+    # paired with aggressive value compression for high overall compression
+    add(uniform(8, 2, 0, 0, False))
+    add(uniform(8, 2, 12, 0, False))
+    add(uniform(8, 3, 0, 0, False))
+    add(uniform(8, 3, 12, 0, False))
+    add(uniform(8, 2, 0, 128, False))
+    add(uniform(8, 2, 0, 256, False))
+    # fp16_window=512 variants of best configs
+    add(uniform(4, 2, 12, 512, True))
+    add(uniform(4, 2, 12, 512, False))
+    add(uniform(3, 2, 12, 512, True))
+    add(uniform(3, 2, 6, 512, False))
+    # Channel-adaptive: mixed-precision keys (KITTY-style)
+    add(adaptive(4, 2, 2, 0))      # 2.5-bit avg keys, 2-bit vals
+    add(adaptive(4, 2, 2, 128))    # 2.5-bit avg keys, 2-bit vals, windowed
+    add(adaptive(4, 3, 2, 0))      # 3.25-bit avg keys, 2-bit vals
+    add(adaptive(4, 3, 2, 128))    # 3.25-bit avg keys, 2-bit vals, windowed
+    add(adaptive(4, 3, 3, 0))      # 3.25-bit avg keys, 3-bit vals
+    add(adaptive(4, 3, 3, 128))    # 3.25-bit avg keys, 3-bit vals, windowed
+
+    # --- Priority 2: K8 combos + combined stacks + adaptive with fp16_window ---
+    # K8 with all value bit-widths and anchor intervals
+    for vb in [2, 3, 4]:
+        for ai in [0, 6, 12, 18]:
+            for rq in [True, False]:
+                add(uniform(8, vb, ai, 0, rq))
+    # Standard moderate-compression combos
     for kb in [4, 5, 6]:
         for vb in [2, 3]:
             for ai in [6, 12, 18]:
                 for rq in [True, False]:
-                    add({"key_bits": kb, "val_bits": vb, "anchor_interval": ai, "fp16_window": 0, "use_residual_quant": rq, "mse_only": True})
+                    add(uniform(kb, vb, ai, 0, rq))
+    # Adaptive with all fp16_window sizes
+    for ac in ADAPTIVE_CONFIGS:
+        for fw in SEARCH_SPACE["fp16_window"]:
+            add(adaptive(ac["high_bits"], ac["low_bits"], ac["val_bits"], fw))
 
-    # --- Priority 3: full systematic sweep ---
+    # --- Priority 3: full systematic sweep of uniform space ---
     for kb, vb, ai, fw, rq, mo in product(
         SEARCH_SPACE["key_bits"],
         SEARCH_SPACE["val_bits"],
@@ -237,7 +325,7 @@ def generate_config_list() -> List[Dict]:
         SEARCH_SPACE["use_residual_quant"],
         SEARCH_SPACE["mse_only"],
     ):
-        add({"key_bits": kb, "val_bits": vb, "anchor_interval": ai, "fp16_window": fw, "use_residual_quant": rq, "mse_only": mo})
+        add(uniform(kb, vb, ai, fw, rq))
 
     return configs
 
@@ -434,7 +522,7 @@ def print_final_summary(results_file: str):
 def run_autoresearch(
     model,
     tokenizer,
-    max_rounds: int = 600,
+    max_rounds: int = 800,
     results_file: str = "autoresearch_results.jsonl",
     resume: bool = False,
     skip_needle: bool = False,
@@ -552,12 +640,21 @@ def run_autoresearch(
             with open(results_file, "a") as f:
                 f.write(json.dumps(error_result) + "\n")
 
+            if config.get("quantizer_type") == "adaptive":
+                err_desc = (
+                    f"adaptive h{config['high_bits']}/l{config['low_bits']} "
+                    f"v={config['val_bits']}b win={config['fp16_window']}"
+                )
+            else:
+                err_desc = (
+                    f"k={config['key_bits']}b v={config['val_bits']}b "
+                    f"anchor={config['anchor_interval']} "
+                    f"window={config['fp16_window']} "
+                    f"resq={config['use_residual_quant']}"
+                )
             print(
                 f"[{round_num+1}/{total_configs}] ERROR "
-                f"k={config['key_bits']}b v={config['val_bits']}b "
-                f"anchor={config['anchor_interval']} "
-                f"window={config['fp16_window']} "
-                f"resq={config['use_residual_quant']} "
+                f"{err_desc} "
                 f"-- {type(e).__name__}: {e}"
             )
             traceback.print_exc()
@@ -605,6 +702,21 @@ def run_autoresearch(
         remaining = (total_configs - round_num - 1) * avg_time
         eta_min = remaining / 60.0
 
+        # Format config description for progress line
+        if config.get("quantizer_type") == "adaptive":
+            cfg_desc = (
+                f"adaptive h{config['high_bits']}/l{config['low_bits']} "
+                f"v={config['val_bits']}b  "
+                f"win={config['fp16_window']}"
+            )
+        else:
+            cfg_desc = (
+                f"k={config['key_bits']}b v={config['val_bits']}b  "
+                f"anchor={config['anchor_interval']}  "
+                f"win={config['fp16_window']}  "
+                f"resq={config['use_residual_quant']}"
+            )
+
         print(
             f"[{round_num+1}/{total_configs}] {stars} "
             f"score={total_score:.4f}  "
@@ -612,10 +724,7 @@ def run_autoresearch(
             f"gen={result_dict.get('gen_score', 0):.3f}  "
             f"ppl+{ppl_pct:.1f}%  "
             f"comp={compression:.2f}x  "
-            f"k={config['key_bits']}b v={config['val_bits']}b  "
-            f"anchor={config['anchor_interval']}  "
-            f"win={config['fp16_window']}  "
-            f"resq={config['use_residual_quant']}  "
+            f"{cfg_desc}  "
             f"({elapsed:.1f}s, ETA {eta_min:.0f}m)"
         )
 
@@ -658,8 +767,8 @@ def main():
         help=f"Model name (default: {MODEL_NAME})",
     )
     parser.add_argument(
-        "--max-rounds", type=int, default=600,
-        help="Max configurations to test (default: 600 = full sweep)",
+        "--max-rounds", type=int, default=800,
+        help="Max configurations to test (default: 800 = full sweep)",
     )
     parser.add_argument(
         "--results-file", default="autoresearch_results.jsonl",
