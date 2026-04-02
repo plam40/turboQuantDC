@@ -6,13 +6,20 @@ Three-tier token storage with eviction of unimportant tokens:
     Tier 1 (warm):  Important older tokens, quantized at key_bits/val_bits.
     Tier 2 (cold):  EVICTED -- not stored at all.
 
-Token importance is scored using exponential recency decay:
+Token importance is scored using a hybrid of recency and structural signals:
 
-    importance[i] = decay_factor ** (current_pos - token_pos[i])
+    importance = 0.3 * recency + 0.7 * structural
 
-This approximates "older tokens are less important", which holds for most
-autoregressive attention patterns. Tokens that age below the eviction
-threshold are removed entirely from the cache, freeing their memory.
+Structural importance protects:
+- **Prompt tokens** (first 20% of the sequence): always importance = 1.0,
+  never evicted. The original question/instruction is critical context.
+- **High-norm keys**: tokens with large key norms act as attention magnets
+  and are more semantically important.
+
+Pure recency scoring evicts semantically important tokens (e.g. the
+original question in Q&A), destroying generation quality. The hybrid
+approach retains these while still evicting genuinely unimportant middle
+tokens.
 
 The result: same quality as quantize-only (GenerationCache) but at 6-8x
 compression by evicting 50-70% of old tokens that receive near-zero
@@ -31,7 +38,7 @@ Usage::
     cache = EvictionCache(
         key_bits=3, val_bits=3,
         fp16_window=64,
-        max_warm_tokens=512,
+        max_warm_tokens=1024,
     )
     output = model.generate(inputs, past_key_values=cache, max_new_tokens=200)
 """
@@ -67,7 +74,7 @@ class _EvictableLayer(_CompressedLayer):
         key_bits: int = 3,
         val_bits: int = 3,
         fp16_window: int = 64,
-        max_warm_tokens: int = 512,
+        max_warm_tokens: int = 1024,
         eviction_threshold: float = 0.01,
         seed: int = 42,
         use_norm_correction: bool = True,
@@ -89,6 +96,10 @@ class _EvictableLayer(_CompressedLayer):
         # Track how many tokens have been evicted total
         self._tokens_evicted: int = 0
 
+        # Per-token key norms for hybrid importance scoring.
+        # Each entry is the mean key norm (across heads) for that token.
+        self._token_key_norms: List[float] = []
+
     def update(
         self,
         key_states: torch.Tensor,
@@ -97,9 +108,20 @@ class _EvictableLayer(_CompressedLayer):
         """Compress, store, potentially evict, and return full cache.
 
         Overrides _CompressedLayer.update() to add eviction after storage.
+        Also captures per-token key norms for hybrid importance scoring.
         """
         new_seq = key_states.shape[2]
         self._tokens_seen += new_seq
+
+        # Capture per-token key norms before compression.
+        # key_states: [batch, heads, seq, d] -> norm across d, mean across heads/batch
+        with torch.no_grad():
+            # [batch, heads, seq]
+            per_token_norms = key_states.float().norm(dim=-1)
+            # Mean across batch and heads -> [seq]
+            mean_norms = per_token_norms.mean(dim=(0, 1))
+            for i in range(new_seq):
+                self._token_key_norms.append(mean_norms[i].item())
 
         # Delegate to parent for compression and storage
         result = super().update(key_states, value_states)
@@ -115,6 +137,9 @@ class _EvictableLayer(_CompressedLayer):
         The warm tier is all compressed tokens minus the fp16_window.
         When this count exceeds max_warm_tokens, we compute importance
         scores and evict the lowest-scoring tokens.
+
+        Prompt tokens (first 20% of sequence, minimum 10) are protected
+        and never evicted, regardless of their importance score.
         """
         total_compressed = self._seq_len
         warm_count = max(0, total_compressed - self.fp16_window)
@@ -141,27 +166,50 @@ class _EvictableLayer(_CompressedLayer):
         if n_eviction_candidates <= 0 or n_to_evict <= 0:
             return
 
-        # Only consider the non-hot portion for eviction
-        candidate_importance = importance[:n_eviction_candidates]
+        # Protect prompt tokens: first 20% of the sequence (min 10).
+        # These are never evicted because they contain the original
+        # question/instruction which is critical for generation quality.
+        prompt_end = max(int(n_total * 0.2), min(10, n_total))
+
+        # Only consider non-hot, non-prompt positions for eviction.
+        # Candidates are positions in [prompt_end, n_eviction_candidates).
+        candidate_importance = importance[prompt_end:n_eviction_candidates]
+        n_actual_candidates = len(candidate_importance)
+
+        if n_actual_candidates <= 0:
+            return
+
+        n_to_evict = min(n_to_evict, n_actual_candidates)
 
         # Find indices of the least important candidates
-        n_to_evict = min(n_to_evict, n_eviction_candidates)
-        _, evict_indices = torch.topk(
+        _, evict_local_indices = torch.topk(
             candidate_importance, k=n_to_evict, largest=False,
         )
 
+        # Map local indices back to global positions
+        evict_global_indices = evict_local_indices + prompt_end
+
         # Build a boolean keep-mask over all tokens
         keep_mask = torch.ones(n_total, dtype=torch.bool)
-        keep_mask[evict_indices] = False
+        keep_mask[evict_global_indices] = False
 
         self._apply_eviction_mask(keep_mask)
         self._tokens_evicted += n_to_evict
 
     def _importance_scores(self) -> Optional[torch.Tensor]:
-        """Compute importance scores for all compressed tokens.
+        """Compute hybrid importance scores for all compressed tokens.
 
-        Uses exponential recency decay:
-            importance[i] = decay ** (total_positions - position_i)
+        Uses a weighted combination of recency and structural importance:
+            importance = 0.3 * recency + 0.7 * structural
+
+        Recency component:
+            Linear from 0 (oldest) to 1 (newest).
+
+        Structural component:
+            - Prompt tokens (first 20% of sequence, min 10): importance = 1.0.
+              The original question/instruction must never be evicted.
+            - Key norm component: tokens with larger key norms are attention
+              magnets and more semantically important. Normalized to [0, 1].
 
         Returns a 1-D float tensor of length self._seq_len, or None
         if no tokens are stored.
@@ -170,19 +218,34 @@ class _EvictableLayer(_CompressedLayer):
         if n == 0:
             return None
 
-        # Exponential decay: more recent positions have higher scores.
-        # decay_factor chosen so that a token at position 0 (oldest) in a
-        # max_warm_tokens-length cache has importance ~ eviction_threshold.
-        # Solving: threshold = decay^(max_warm) => decay = threshold^(1/max_warm)
-        if self.max_warm_tokens > 0:
-            decay = self.eviction_threshold ** (1.0 / self.max_warm_tokens)
-        else:
-            decay = 0.99
-
-        # Position 0 is oldest, position n-1 is newest
         positions = torch.arange(n, dtype=torch.float32)
-        importance = decay ** (n - 1 - positions)
+        current = float(n - 1)
 
+        # Recency component: linear 0-1, higher = more recent
+        recency = 1.0 - (current - positions) / max(current, 1.0)
+
+        # Structural component
+        structural = torch.zeros(n, dtype=torch.float32)
+
+        # Prompt tokens (first 20%, min 10) always get max structural importance
+        prompt_end = max(int(n * 0.2), min(10, n))
+        structural[:prompt_end] = 1.0
+
+        # Key norm component: high-norm keys are attention magnets
+        if self._token_key_norms and len(self._token_key_norms) >= n:
+            norms = torch.tensor(
+                self._token_key_norms[:n], dtype=torch.float32,
+            )
+            norm_min = norms.min()
+            norm_range = norms.max() - norm_min
+            if norm_range > 1e-8:
+                norm_importance = (norms - norm_min) / norm_range
+            else:
+                norm_importance = torch.zeros_like(norms)
+            # Take element-wise max so prompt tokens stay at 1.0
+            structural = torch.max(structural, norm_importance)
+
+        importance = 0.3 * recency + 0.7 * structural
         return importance
 
     def _apply_eviction_mask(self, keep_mask: torch.Tensor) -> None:
@@ -238,6 +301,14 @@ class _EvictableLayer(_CompressedLayer):
                 self._raw_vals = [all_rv[:, :, raw_mask, :]]
             # else: raw storage is stale / trimmed, leave as is
 
+        # Filter per-token key norms to match the keep mask
+        if self._token_key_norms:
+            self._token_key_norms = [
+                self._token_key_norms[i]
+                for i in range(min(len(self._token_key_norms), len(keep_mask)))
+                if keep_mask[i]
+            ]
+
         new_seq_len = int(mask_seq.sum().item())
         self._seq_len = new_seq_len
 
@@ -253,11 +324,13 @@ class _EvictableLayer(_CompressedLayer):
 
 
 class EvictionCache:
-    """KV cache with attention-guided token eviction.
+    """KV cache with hybrid importance scoring and token eviction.
 
-    Tracks token importance using exponential recency decay and evicts
-    tokens that receive consistently low importance, dramatically reducing
-    memory usage for long sequences.
+    Scores token importance using a weighted combination of recency
+    (30%) and structural signals (70%):
+    - Prompt tokens (first 20% of sequence): always protected.
+    - High key-norm tokens: attention magnets, scored higher.
+    - Recent tokens: mild recency preference.
 
     Three tiers of token storage:
     1. **Hot** (last fp16_window tokens): FP16, full precision.
@@ -272,7 +345,7 @@ class EvictionCache:
         key_bits: Bits for key quantization (default: 3).
         val_bits: Bits for value quantization (default: 3).
         fp16_window: Number of recent tokens at FP16 (default: 64).
-        max_warm_tokens: Max quantized tokens to keep per layer (default: 512).
+        max_warm_tokens: Max quantized tokens to keep per layer (default: 1024).
         eviction_threshold: Importance threshold for eviction (default: 0.01).
         anchor_interval: Every Nth layer stored at FP16 (default: 12).
             Set to 0 to disable anchors.
@@ -287,7 +360,7 @@ class EvictionCache:
         key_bits: int = 3,
         val_bits: int = 3,
         fp16_window: int = 64,
-        max_warm_tokens: int = 512,
+        max_warm_tokens: int = 1024,
         eviction_threshold: float = 0.01,
         anchor_interval: int = 12,
         seed: int = 42,

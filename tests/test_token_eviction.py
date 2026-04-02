@@ -64,7 +64,7 @@ class TestEvictionCacheConstruction:
         assert cache.key_bits == 3
         assert cache.val_bits == 3
         assert cache.fp16_window == 64
-        assert cache.max_warm_tokens == 512
+        assert cache.max_warm_tokens == 1024
         assert cache.eviction_threshold == 0.01
         assert cache.use_residual_quant is True
 
@@ -283,9 +283,11 @@ class TestEviction:
             k, v = make_kv_states(seq_len=1, seed=i + 100)
             cache.update(k, v, layer_idx=0)
 
-        # After eviction, seq_length should be <= fp16_win + max_warm
+        # After eviction, seq_length should be bounded. With prompt
+        # protection (first 20%), some extra tokens may survive.
         seq = cache.get_seq_length(0)
-        assert seq <= fp16_win + max_warm
+        prompt_protected = max(int(total_tokens * 0.2), 10)
+        assert seq <= fp16_win + max_warm + prompt_protected
 
     def test_eviction_preserves_recent_tokens(self):
         """Recent tokens (in hot tier) should always survive eviction."""
@@ -351,51 +353,220 @@ class TestEviction:
         stats = cache.eviction_stats()
         assert stats["total_tokens_seen"] == total
         assert stats["total_tokens_evicted"] > 0
-        assert stats["total_tokens_retained"] <= fp16_win + max_warm
+        # Retained tokens may exceed fp16_win + max_warm because prompt
+        # tokens (first 20%) are protected from eviction. Allow some slack
+        # for prompt protection overhead.
+        prompt_protected = max(int(total * 0.2), 10)
+        assert stats["total_tokens_retained"] <= fp16_win + max_warm + prompt_protected
 
 
 # ===========================================================================
-# Test: Importance scoring
+# Test: Importance scoring (hybrid: recency + structural)
 # ===========================================================================
 class TestImportanceScoring:
-    """Validate the exponential decay importance scoring."""
+    """Validate the hybrid importance scoring (recency + structural)."""
 
-    def test_most_recent_has_highest_importance(self):
-        """The most recently appended token should have the highest importance."""
+    def test_prompt_tokens_have_high_importance(self):
+        """Prompt tokens (first 20%) should have high structural importance."""
         cache = EvictionCache(
             seed=SEED,
             fp16_window=4,
-            max_warm_tokens=100,
+            max_warm_tokens=200,
             anchor_interval=0,
         )
 
-        for i in range(20):
+        for i in range(50):
             k, v = make_kv_states(seq_len=1, seed=i + 500)
             cache.update(k, v, layer_idx=0)
 
         importance = cache._compute_importance(layer_idx=0)
-        if importance is not None and len(importance) > 1:
-            # Last position should have highest importance
-            assert importance[-1] >= importance[0]
+        assert importance is not None
 
-    def test_older_tokens_have_lower_importance(self):
-        """Importance should monotonically decrease with age."""
+        n = len(importance)
+        prompt_end = max(int(n * 0.2), 10)
+
+        # Prompt tokens should have structural importance = 1.0,
+        # which means total importance >= 0.7 (0.7 * 1.0)
+        for j in range(min(prompt_end, n)):
+            assert importance[j] >= 0.69, (
+                f"Prompt token {j} has importance {importance[j]:.3f}, "
+                f"expected >= 0.7"
+            )
+
+    def test_middle_tokens_lower_than_prompt(self):
+        """Middle tokens (not prompt, not recent) should be lower than prompt."""
+        cache = EvictionCache(
+            seed=SEED,
+            fp16_window=4,
+            max_warm_tokens=200,
+            anchor_interval=0,
+        )
+
+        for i in range(50):
+            k, v = make_kv_states(seq_len=1, seed=i + 600)
+            cache.update(k, v, layer_idx=0)
+
+        importance = cache._compute_importance(layer_idx=0)
+        assert importance is not None
+
+        n = len(importance)
+        prompt_end = max(int(n * 0.2), 10)
+
+        # Find the average importance of prompt vs middle tokens
+        prompt_avg = importance[:prompt_end].mean().item()
+        mid_start = prompt_end
+        mid_end = n - 4  # exclude hot tier
+        if mid_end > mid_start:
+            middle_avg = importance[mid_start:mid_end].mean().item()
+            assert prompt_avg > middle_avg, (
+                f"Prompt avg {prompt_avg:.3f} should exceed middle avg {middle_avg:.3f}"
+            )
+
+    def test_importance_returns_none_for_empty(self):
+        """Importance should be None when no tokens are stored."""
         cache = EvictionCache(
             seed=SEED,
             fp16_window=4,
             max_warm_tokens=100,
             anchor_interval=0,
         )
+        importance = cache._compute_importance(layer_idx=0)
+        assert importance is None
 
+    def test_importance_includes_key_norm_signal(self):
+        """Tokens with higher key norms should get higher structural importance."""
+        cache = EvictionCache(
+            seed=SEED,
+            fp16_window=4,
+            max_warm_tokens=200,
+            anchor_interval=0,
+        )
+
+        # Insert normal tokens
         for i in range(20):
-            k, v = make_kv_states(seq_len=1, seed=i + 600)
+            k, v = make_kv_states(seq_len=1, seed=i + 700)
+            cache.update(k, v, layer_idx=0)
+
+        # Insert a high-norm token at position 20 (outside prompt zone)
+        k_big, v_big = make_kv_states(seq_len=1, seed=999)
+        k_big = k_big * 10.0  # much larger norm
+        cache.update(k_big, v_big, layer_idx=0)
+
+        # Insert more normal tokens after
+        for i in range(10):
+            k, v = make_kv_states(seq_len=1, seed=i + 800)
             cache.update(k, v, layer_idx=0)
 
         importance = cache._compute_importance(layer_idx=0)
-        if importance is not None and len(importance) > 2:
-            # Should be non-decreasing (newer tokens >= older tokens)
-            for j in range(1, len(importance)):
-                assert importance[j] >= importance[j - 1]
+        assert importance is not None
+
+        # The high-norm token at position 20 should have higher importance
+        # than its immediate neighbors (positions 19 and 21)
+        assert importance[20] > importance[19], (
+            f"High-norm token importance {importance[20]:.3f} "
+            f"should exceed neighbor {importance[19]:.3f}"
+        )
+
+
+# ===========================================================================
+# Test: Prompt protection
+# ===========================================================================
+class TestPromptProtection:
+    """Validate that prompt tokens (first 20%) are never evicted."""
+
+    def test_prompt_tokens_survive_eviction(self):
+        """After heavy eviction, the first 20% of tokens should be retained."""
+        fp16_win = 4
+        max_warm = 16
+        cache = EvictionCache(
+            seed=SEED,
+            fp16_window=fp16_win,
+            max_warm_tokens=max_warm,
+            anchor_interval=0,
+        )
+
+        # Insert many tokens to trigger heavy eviction
+        total = 80
+        for i in range(total):
+            k, v = make_kv_states(seq_len=1, seed=i + 1100)
+            cache.update(k, v, layer_idx=0)
+
+        # After eviction, the retained count should be <= fp16_win + max_warm
+        seq = cache.get_seq_length(0)
+        assert seq <= fp16_win + max_warm
+
+        # But we should retain more than just the hot window,
+        # because prompt tokens are protected
+        assert seq > fp16_win, (
+            f"Expected more than hot window ({fp16_win}), got {seq}"
+        )
+
+    def test_eviction_only_removes_middle_tokens(self):
+        """Eviction should remove tokens from the middle, not the prompt."""
+        fp16_win = 4
+        max_warm = 12
+        cache = EvictionCache(
+            seed=SEED,
+            fp16_window=fp16_win,
+            max_warm_tokens=max_warm,
+            anchor_interval=0,
+        )
+
+        # Feed 50 tokens, triggering eviction
+        for i in range(50):
+            k, v = make_kv_states(seq_len=1, seed=i + 1200)
+            cache.update(k, v, layer_idx=0)
+
+        stats = cache.eviction_stats()
+        assert stats["total_tokens_evicted"] > 0
+        # Still has tokens retained (prompt + hot + some warm)
+        assert stats["total_tokens_retained"] > fp16_win
+
+
+# ===========================================================================
+# Test: Key norm tracking
+# ===========================================================================
+class TestKeyNormTracking:
+    """Validate that per-token key norms are tracked for importance."""
+
+    def test_key_norms_tracked_on_update(self):
+        """After updates, the layer should have per-token key norms."""
+        cache = EvictionCache(
+            seed=SEED,
+            fp16_window=4,
+            max_warm_tokens=200,
+            anchor_interval=0,
+        )
+
+        for i in range(10):
+            k, v = make_kv_states(seq_len=1, seed=i + 1300)
+            cache.update(k, v, layer_idx=0)
+
+        layer = cache._layers[0]
+        assert hasattr(layer, '_token_key_norms')
+        assert len(layer._token_key_norms) == 10
+
+    def test_key_norms_filtered_on_eviction(self):
+        """After eviction, key norms list should shrink to match retained tokens."""
+        fp16_win = 4
+        max_warm = 8
+        cache = EvictionCache(
+            seed=SEED,
+            fp16_window=fp16_win,
+            max_warm_tokens=max_warm,
+            anchor_interval=0,
+        )
+
+        for i in range(30):
+            k, v = make_kv_states(seq_len=1, seed=i + 1400)
+            cache.update(k, v, layer_idx=0)
+
+        layer = cache._layers[0]
+        seq_len = cache.get_seq_length(0)
+        assert len(layer._token_key_norms) == seq_len, (
+            f"Key norms ({len(layer._token_key_norms)}) should match "
+            f"seq_len ({seq_len}) after eviction"
+        )
 
 
 # ===========================================================================
@@ -487,15 +658,18 @@ class TestMultiLayer:
         )
 
         # Feed many tokens to layer 0 but few to layer 1
-        for i in range(30):
+        total_l0 = 30
+        for i in range(total_l0):
             k, v = make_kv_states(seq_len=1, seed=i + 800)
             cache.update(k, v, layer_idx=0)
         for i in range(5):
             k, v = make_kv_states(seq_len=1, seed=i + 900)
             cache.update(k, v, layer_idx=1)
 
-        # Layer 0 should have eviction, layer 1 should not
-        assert cache.get_seq_length(0) <= 4 + 8
+        # Layer 0 should have eviction (with prompt protection slack),
+        # layer 1 should not
+        prompt_protected = max(int(total_l0 * 0.2), 10)
+        assert cache.get_seq_length(0) <= 4 + 8 + prompt_protected
         assert cache.get_seq_length(1) == 5
 
 
