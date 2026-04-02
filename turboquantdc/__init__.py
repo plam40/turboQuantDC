@@ -76,6 +76,20 @@ from .entropy_coding import (
 )
 from .token_eviction import EvictionCache
 from .residual_vq import ResidualVQ, ResidualVQCache, ResidualVQLayer
+from .weight_compression import (
+    CompressedLinear,
+    TurboQuantWeightCompressor,
+    compress_model,
+    compute_weight_bit_schedule,
+    effective_bpw,
+    estimate_compressed_size,
+)
+from .streaming_70b import (
+    AsyncPrefetcher,
+    LayerGPUCache,
+    MemoryPlanner,
+    StreamingModel,
+)
 
 __all__ = [
     # Codebook
@@ -163,6 +177,18 @@ __all__ = [
     "ResidualVQ",
     "ResidualVQCache",
     "ResidualVQLayer",
+    # Weight Compression (TQ-W)
+    "CompressedLinear",
+    "TurboQuantWeightCompressor",
+    "compress_model",
+    "compute_weight_bit_schedule",
+    "effective_bpw",
+    "estimate_compressed_size",
+    # Streaming 70B Engine
+    "StreamingModel",
+    "LayerGPUCache",
+    "MemoryPlanner",
+    "AsyncPrefetcher",
 ]
 
 __version__ = "0.2.0"
