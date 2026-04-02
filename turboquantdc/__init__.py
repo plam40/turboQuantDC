@@ -91,6 +91,33 @@ from .streaming_70b import (
     StreamingModel,
 )
 
+
+def run_model(
+    model_name: str = "meta-llama/Llama-3.3-70B-Instruct",
+    context_target: int = 144_000,
+    speed_mode: str = "balanced",
+    prompt=None,
+) -> None:
+    """One-line API to run any 70B model on an RTX 4090.
+
+    Convenience wrapper that delegates to run_70b.run_model().
+    See ``python run_70b.py --help`` for full CLI options.
+
+    Args:
+        model_name: HuggingFace model name or path.
+        context_target: Target context length in tokens.
+        speed_mode: One of "safe", "balanced", "fast".
+        prompt: Optional single prompt (None = interactive chat).
+    """
+    from run_70b import run_model as _run_model
+    _run_model(
+        model_name=model_name,
+        context_target=context_target,
+        speed_mode=speed_mode,
+        prompt=prompt,
+    )
+
+
 __all__ = [
     # Codebook
     "beta_pdf",
@@ -189,6 +216,8 @@ __all__ = [
     "LayerGPUCache",
     "MemoryPlanner",
     "AsyncPrefetcher",
+    # Unified 70B Launcher
+    "run_model",
 ]
 
 __version__ = "0.2.0"
