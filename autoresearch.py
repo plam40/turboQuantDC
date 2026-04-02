@@ -141,11 +141,22 @@ def compute_compression_ratio(config: Dict) -> float:
 def build_cache(config: Dict):
     """Build the appropriate cache for a configuration.
 
-    Dispatches to ChannelAdaptiveCache for adaptive configs, or
-    GenerationCache for uniform configs.
+    Dispatches based on quantizer_type:
+    - "adaptive": ChannelAdaptiveCache (KITTY-style mixed precision)
+    - "eviction": EvictionCache (token eviction for higher compression)
+    - default: GenerationCache (uniform quantization)
+
+    For uniform configs, supports anchor_strategy parameter:
+    - "fixed" (default): every Nth layer FP16
+    - "boundary": first 2 + last 2 layers FP16
+    - "gradient": boundary FP16 + gradient bit allocation
     """
     if config.get("quantizer_type") == "adaptive":
         return build_adaptive_cache(config)
+    if config.get("quantizer_type") == "eviction":
+        return build_eviction_cache(config)
+    if config.get("quantizer_type") == "hybrid":
+        return build_hybrid_cache(config)
 
     from turboquantdc.generation_cache import GenerationCache
 
@@ -154,6 +165,7 @@ def build_cache(config: Dict):
     fp16_window = config["fp16_window"]
     anchor_interval = config["anchor_interval"]
     use_residual_quant = config.get("use_residual_quant", True)
+    anchor_strategy = config.get("anchor_strategy", "fixed")
 
     cache = GenerationCache(
         key_bits=key_bits,
@@ -162,6 +174,42 @@ def build_cache(config: Dict):
         anchor_interval=anchor_interval,
         seed=42,
         use_residual_quant=use_residual_quant,
+        anchor_strategy=anchor_strategy,
+        num_layers=NUM_LAYERS,
+    )
+    return cache
+
+
+def build_hybrid_cache(config: Dict):
+    """Build a HybridCache combining all winning strategies."""
+    from turboquantdc.generation_cache import HybridCache
+
+    cache = HybridCache(
+        num_layers=NUM_LAYERS,
+        base_key_bits=config.get("key_bits", 3),
+        base_val_bits=config.get("val_bits", 3),
+        fp16_window=config.get("fp16_window", 64),
+        warmup_tokens=config.get("warmup_tokens", 20),
+        high_entropy_pct=config.get("high_entropy_pct", 75),
+        low_entropy_pct=config.get("low_entropy_pct", 25),
+        seed=42,
+    )
+    return cache
+
+
+def build_eviction_cache(config: Dict):
+    """Build an EvictionCache for token eviction + quantization."""
+    from turboquantdc.token_eviction import EvictionCache
+
+    cache = EvictionCache(
+        key_bits=config.get("key_bits", 3),
+        val_bits=config.get("val_bits", 3),
+        fp16_window=config.get("fp16_window", 64),
+        max_warm_tokens=config.get("max_warm_tokens", 512),
+        eviction_threshold=config.get("eviction_threshold", 0.01),
+        anchor_interval=config.get("anchor_interval", 12),
+        use_residual_quant=config.get("use_residual_quant", True),
+        seed=42,
     )
     return cache
 
@@ -226,8 +274,22 @@ def config_key(config: Dict) -> str:
             f"_v{config['val_bits']}"
             f"_w{config['fp16_window']}"
         )
+    if config.get("quantizer_type") == "hybrid":
+        return (
+            f"hybrid_k{config['key_bits']}_v{config['val_bits']}"
+            f"_w{config['fp16_window']}"
+        )
+    if config.get("quantizer_type") == "eviction":
+        return (
+            f"evict_k{config['key_bits']}_v{config['val_bits']}"
+            f"_w{config['fp16_window']}"
+            f"_warm{config.get('max_warm_tokens', 512)}"
+            f"_rq{int(config['use_residual_quant'])}"
+        )
+    strategy = config.get("anchor_strategy", "fixed")
+    prefix = {"fixed": "", "gradient": "grad_", "boundary": "bnd_"}.get(strategy, "")
     return (
-        f"k{config['key_bits']}_v{config['val_bits']}"
+        f"{prefix}k{config['key_bits']}_v{config['val_bits']}"
         f"_a{config['anchor_interval']}"
         f"_w{config['fp16_window']}"
         f"_rq{int(config['use_residual_quant'])}"
@@ -258,6 +320,40 @@ def generate_config_list() -> List[Dict]:
     def adaptive(hb, lb, vb, fw):
         """Shorthand for adaptive config dict."""
         return {"quantizer_type": "adaptive", "high_bits": hb, "low_bits": lb, "val_bits": vb, "boost_fraction": ADAPTIVE_BOOST_FRACTION, "fp16_window": fw, "anchor_interval": 0, "use_residual_quant": False, "mse_only": True}
+
+    def gradient(kb, vb, fw, rq):
+        """Shorthand for gradient anchor strategy config."""
+        return {"key_bits": kb, "val_bits": vb, "anchor_interval": 0, "fp16_window": fw, "use_residual_quant": rq, "mse_only": True, "anchor_strategy": "gradient"}
+
+    def boundary(kb, vb, fw, rq):
+        """Shorthand for boundary anchor strategy config."""
+        return {"key_bits": kb, "val_bits": vb, "anchor_interval": 0, "fp16_window": fw, "use_residual_quant": rq, "mse_only": True, "anchor_strategy": "boundary"}
+
+    def eviction(kb, vb, fw, rq, max_warm=1024):
+        """Shorthand for eviction cache config."""
+        return {"quantizer_type": "eviction", "key_bits": kb, "val_bits": vb, "fp16_window": fw, "anchor_interval": 12, "use_residual_quant": rq, "mse_only": True, "max_warm_tokens": max_warm, "eviction_threshold": 0.01}
+
+    def hybrid(kb, vb, fw):
+        """Shorthand for hybrid cache config (boundary+gradient+per-head)."""
+        return {"quantizer_type": "hybrid", "key_bits": kb, "val_bits": vb, "fp16_window": fw, "anchor_interval": 0, "use_residual_quant": True, "mse_only": True, "warmup_tokens": 20, "high_entropy_pct": 75, "low_entropy_pct": 25}
+
+    # --- Priority 0: HybridCache (the main hypothesis) ---
+    # HybridCache combines boundary+gradient anchoring + per-head bit allocation
+    add(hybrid(3, 3, 0))      # K3/V3 hybrid, no window — the headline test
+    add(hybrid(3, 3, 64))     # K3/V3 hybrid + small window
+    add(hybrid(3, 2, 0))      # K3/V2 hybrid aggressive
+    add(hybrid(3, 2, 64))     # K3/V2 hybrid + window
+    add(hybrid(4, 3, 0))      # K4/V3 hybrid
+    add(hybrid(4, 3, 64))     # K4/V3 hybrid + window
+    add(hybrid(4, 2, 0))      # K4/V2 hybrid aggressive
+    add(hybrid(4, 2, 64))     # K4/V2 hybrid + window
+    add(hybrid(3, 3, 128))    # K3/V3 hybrid + medium window
+    add(hybrid(5, 3, 0))      # K5/V3 hybrid
+    # Fixed eviction (improved with prompt protection + key norm weighting)
+    add(eviction(3, 3, 64, True, 1024))   # K3 eviction, 1024 warm (new default)
+    add(eviction(3, 3, 64, True, 512))    # K3 eviction, 512 warm
+    add(eviction(4, 3, 64, True, 1024))   # K4 eviction
+    add(eviction(3, 2, 64, True, 1024))   # K3 aggressive eviction
 
     # --- Priority 1: known good configs + K8 near-lossless + adaptive ---
     # Anchor-12 + 4-bit keys + 4-bit values (known clean)
@@ -298,6 +394,28 @@ def generate_config_list() -> List[Dict]:
     add(adaptive(4, 3, 2, 128))    # 3.25-bit avg keys, 2-bit vals, windowed
     add(adaptive(4, 3, 3, 0))      # 3.25-bit avg keys, 3-bit vals
     add(adaptive(4, 3, 3, 128))    # 3.25-bit avg keys, 3-bit vals, windowed
+    # --- NEW: Gradient anchor strategy (boundary FP16 + gradient bits) ---
+    # These use smart per-layer bit allocation: 8-bit at edges, base_bits in middle
+    add(gradient(3, 3, 0, True))    # K3 gradient, RQ — the big hypothesis
+    add(gradient(3, 3, 64, True))   # K3 gradient + small window
+    add(gradient(3, 2, 0, True))    # K3 aggressive gradient
+    add(gradient(3, 2, 64, True))   # K3 aggressive gradient + window
+    add(gradient(4, 3, 0, True))    # K4 gradient
+    add(gradient(4, 2, 0, True))    # K4 gradient aggressive
+    add(gradient(3, 3, 128, True))  # K3 gradient + medium window
+    add(gradient(4, 3, 64, False))  # K4 gradient no RQ
+    # Boundary strategy (first 2 + last 2 layers FP16)
+    add(boundary(3, 3, 0, True))    # K3 boundary
+    add(boundary(3, 3, 64, True))   # K3 boundary + window
+    add(boundary(4, 3, 0, True))    # K4 boundary
+    add(boundary(4, 2, 0, True))    # K4 boundary aggressive
+    # --- NEW: Token eviction (quantize + evict for higher compression) ---
+    add(eviction(3, 3, 64, True, 512))    # K3 eviction, 512 warm
+    add(eviction(3, 3, 64, True, 256))    # K3 eviction, 256 warm (aggressive)
+    add(eviction(3, 2, 64, True, 512))    # K3 aggressive eviction
+    add(eviction(4, 3, 64, True, 512))    # K4 eviction
+    add(eviction(3, 3, 128, True, 512))   # K3 eviction, larger window
+    add(eviction(4, 2, 64, True, 256))    # K4 aggressive eviction
 
     # --- Priority 2: K8 combos + combined stacks + adaptive with fp16_window ---
     # K8 with all value bit-widths and anchor intervals
@@ -315,6 +433,24 @@ def generate_config_list() -> List[Dict]:
     for ac in ADAPTIVE_CONFIGS:
         for fw in SEARCH_SPACE["fp16_window"]:
             add(adaptive(ac["high_bits"], ac["low_bits"], ac["val_bits"], fw))
+    # Gradient strategy: systematic sweep of key/val bits with windows
+    for kb in [3, 4, 5]:
+        for vb in [2, 3]:
+            for fw in [0, 64, 128, 256]:
+                for rq in [True, False]:
+                    add(gradient(kb, vb, fw, rq))
+    # Boundary strategy: systematic sweep
+    for kb in [3, 4, 5]:
+        for vb in [2, 3]:
+            for fw in [0, 64, 128]:
+                for rq in [True, False]:
+                    add(boundary(kb, vb, fw, rq))
+    # Eviction: systematic sweep of warm token limits
+    for kb in [3, 4]:
+        for vb in [2, 3]:
+            for fw in [64, 128]:
+                for max_warm in [256, 512]:
+                    add(eviction(kb, vb, fw, True, max_warm))
 
     # --- Priority 3: full systematic sweep of uniform space ---
     for kb, vb, ai, fw, rq, mo in product(
