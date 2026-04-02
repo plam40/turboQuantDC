@@ -913,7 +913,10 @@ class TestPresets:
     def test_presets_dict_exists(self):
         """GenerationCache.PRESETS should be a dict with known keys."""
         assert isinstance(GenerationCache.PRESETS, dict)
-        assert set(GenerationCache.PRESETS.keys()) == {"lossless", "balanced", "aggressive"}
+        assert set(GenerationCache.PRESETS.keys()) == {
+            "lossless", "balanced", "aggressive",
+            "hybrid_max_quality", "hybrid_max_compression",
+        }
 
     def test_lossless_preset_config(self):
         """Lossless preset should use K8/V3 anchor=12."""
@@ -959,7 +962,8 @@ class TestPresets:
         """Each preset should create a cache that works for basic operations."""
         keys, values = make_kv_states(seq_len=16, seed=42)
         for name in GenerationCache.PRESETS:
-            cache = GenerationCache.from_preset(name, seed=SEED)
+            # Hybrid presets need num_layers (boundary/gradient strategy)
+            cache = GenerationCache.from_preset(name, seed=SEED, num_layers=12)
             k_out, v_out = cache.update(keys, values, layer_idx=0)
             assert k_out.shape == keys.shape, f"Preset '{name}' returned wrong key shape"
             assert v_out.shape == values.shape, f"Preset '{name}' returned wrong value shape"
