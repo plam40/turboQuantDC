@@ -15,6 +15,7 @@ from turboquantdc.generation_cache import (
     GenerationCache,
     _CompressedLayer,
     _FP16Layer,
+    _TRITON_AVAILABLE,
 )
 
 
@@ -982,3 +983,108 @@ class TestPresets:
         assert "lossless" in GENERATION_PRESETS
         assert "balanced" in GENERATION_PRESETS
         assert "aggressive" in GENERATION_PRESETS
+
+
+# ---------------------------------------------------------------------------
+# Test: Triton dispatch integration
+# ---------------------------------------------------------------------------
+@pytest.mark.skipif(
+    not (torch.cuda.is_available() and _TRITON_AVAILABLE),
+    reason="CUDA and Triton required",
+)
+class TestTritonQuantizeDispatch:
+    """Validate that Triton quantize path matches Python path for QR rotation."""
+
+    def _make_gpu_kv(self, seq_len=8, head_dim=HEAD_DIM, seed=42):
+        torch.manual_seed(seed)
+        keys = torch.randn(1, 2, seq_len, head_dim, device="cuda")
+        values = torch.randn(1, 2, seq_len, head_dim, device="cuda")
+        return keys, values
+
+    def test_triton_path_activates_for_qr_rotation(self):
+        """With rotation_type='qr' on CUDA, _triton_ready should be True."""
+        cache = GenerationCache(seed=SEED, rotation_type="qr", use_triton=True)
+        keys, values = self._make_gpu_kv()
+        cache.update(keys, values, layer_idx=1)  # layer 1 is compressed
+        layer = cache._layers[1]
+        assert isinstance(layer, _CompressedLayer)
+        assert layer._triton_ready is True
+
+    def test_triton_path_disabled_for_wht_rotation(self):
+        """WHT rotation should fall back to Python even with use_triton=True."""
+        cache = GenerationCache(seed=SEED, rotation_type="wht", use_triton=True)
+        keys, values = self._make_gpu_kv()
+        cache.update(keys, values, layer_idx=1)
+        layer = cache._layers[1]
+        assert isinstance(layer, _CompressedLayer)
+        assert layer._triton_ready is False
+
+    def test_triton_disabled_explicitly(self):
+        """use_triton=False should disable Triton even for QR on CUDA."""
+        cache = GenerationCache(seed=SEED, rotation_type="qr", use_triton=False)
+        keys, values = self._make_gpu_kv()
+        cache.update(keys, values, layer_idx=1)
+        layer = cache._layers[1]
+        assert isinstance(layer, _CompressedLayer)
+        assert layer._triton_ready is False
+
+    def test_triton_matches_python_output_shapes(self):
+        """Triton quantize path should produce same output shapes as Python."""
+        keys, values = self._make_gpu_kv(seq_len=16)
+
+        cache_triton = GenerationCache(
+            seed=SEED, rotation_type="qr", use_triton=True,
+        )
+        cache_python = GenerationCache(
+            seed=SEED, rotation_type="qr", use_triton=False,
+        )
+
+        kt, vt = cache_triton.update(keys, values, layer_idx=1)
+        kp, vp = cache_python.update(keys, values, layer_idx=1)
+
+        assert kt.shape == kp.shape
+        assert vt.shape == vp.shape
+
+    def test_triton_matches_python_quality(self):
+        """Triton path should produce similar cosine similarity to Python."""
+        keys, values = self._make_gpu_kv(seq_len=32, seed=123)
+
+        cache_triton = GenerationCache(
+            key_bits=3, val_bits=2, seed=SEED, rotation_type="qr",
+            use_triton=True, fp16_window=0,
+        )
+        cache_python = GenerationCache(
+            key_bits=3, val_bits=2, seed=SEED, rotation_type="qr",
+            use_triton=False, fp16_window=0,
+        )
+
+        kt, vt = cache_triton.update(keys, values, layer_idx=1)
+        kp, vp = cache_python.update(keys, values, layer_idx=1)
+
+        # Both should reconstruct with similar quality
+        cos_k_triton = cosine_sim(kt, keys)
+        cos_k_python = cosine_sim(kp, keys)
+        cos_v_triton = cosine_sim(vt, values)
+        cos_v_python = cosine_sim(vp, values)
+
+        # Triton and Python paths use same algorithm, quality should be close
+        assert abs(cos_k_triton - cos_k_python) < 0.05, (
+            f"Key quality mismatch: triton={cos_k_triton:.4f}, python={cos_k_python:.4f}"
+        )
+        assert abs(cos_v_triton - cos_v_python) < 0.05, (
+            f"Value quality mismatch: triton={cos_v_triton:.4f}, python={cos_v_python:.4f}"
+        )
+
+    def test_triton_cache_accumulates_correctly(self):
+        """Triton path should accumulate multiple updates correctly."""
+        cache = GenerationCache(
+            seed=SEED, rotation_type="qr", use_triton=True,
+        )
+        k1, v1 = self._make_gpu_kv(seq_len=8, seed=1)
+        k2, v2 = self._make_gpu_kv(seq_len=4, seed=2)
+
+        cache.update(k1, v1, layer_idx=1)
+        kt, vt = cache.update(k2, v2, layer_idx=1)
+
+        assert kt.shape[2] == 12  # 8 + 4
+        assert vt.shape[2] == 12

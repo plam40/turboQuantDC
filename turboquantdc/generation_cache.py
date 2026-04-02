@@ -285,15 +285,20 @@ class _CompressedLayer:
             and self._rotation is not None
             and str(self._device).startswith("cuda")
         ):
-            R = self._rotation.contiguous()
+            # Rotation convention: Python path uses x @ R (row notation),
+            # which is R^T @ x in column notation. The Triton kernel computes
+            # R_arg @ x, so we pass R^T to match the Python convention.
+            self._triton_R = self._rotation.T.contiguous().to(self._device)
             # QJL matrix S (m x d) with m = d
             self._triton_S = generate_qjl_matrix(
                 d, m=d, seed=self.seed + 1, device="cpu",
             ).contiguous().to(self._device)
-            # SR = S @ R^T  (precomputed so kernel avoids inverse rotation)
-            SR = (self._triton_S @ R.T).contiguous()
-            self._triton_key_SR = SR
-            self._triton_val_SR = SR  # same rotation, same SR
+            # SR = S @ R: the kernel computes sign(SR @ res_rot) where
+            # res_rot is in rotated space. Original residual r = R @ res_rot
+            # (inverse of R^T), so S @ r = S @ R @ res_rot => SR = S @ R.
+            SR = (self._triton_S @ self._rotation.contiguous()).contiguous()
+            self._triton_key_SR = SR.to(self._device)
+            self._triton_val_SR = SR.to(self._device)
             self._triton_ready = True
 
     # -- quantization --
@@ -388,10 +393,11 @@ class _CompressedLayer:
         SR = self._triton_key_SR
 
         # Fused rotate + quantize via Triton kernel.
+        # Pass R^T so the kernel computes R^T @ x, matching Python's x @ R.
         # Returns: indices (n, d) int32, qjl_signs (n, m), residual_norms (n,)
         indices, _qjl_signs, _res_norms = _triton_quantize(
             normalized,
-            self._rotation.contiguous(),
+            self._triton_R,
             codebook.boundaries.contiguous(),
             codebook.centroids.contiguous(),
             SR,
