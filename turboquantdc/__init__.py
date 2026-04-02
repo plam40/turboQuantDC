@@ -75,6 +75,7 @@ from .entropy_coding import (
     theoretical_index_entropy,
 )
 from .token_eviction import EvictionCache
+from .self_correcting_cache import SelfCorrectingCache
 from .residual_vq import ResidualVQ, ResidualVQCache, ResidualVQLayer
 from .weight_compression import (
     CompressedLinear,
@@ -89,6 +90,15 @@ from .streaming_70b import (
     LayerGPUCache,
     MemoryPlanner,
     StreamingModel,
+)
+from .ultra_streaming import (
+    KNOWN_ARCHITECTURES,
+    KVManager,
+    ModelAnalyzer,
+    UltraStreamingEngine,
+    WeightManager,
+    format_plan_report,
+    plan_memory,
 )
 
 
@@ -200,6 +210,8 @@ __all__ = [
     "entropy_analysis_sweep",
     # Token Eviction
     "EvictionCache",
+    # Self-Correcting Cache (periodic refresh)
+    "SelfCorrectingCache",
     # Residual Vector Quantization (2-stage RVQ)
     "ResidualVQ",
     "ResidualVQCache",
@@ -218,6 +230,14 @@ __all__ = [
     "AsyncPrefetcher",
     # Unified 70B Launcher
     "run_model",
+    # Ultra-Streaming (200B+)
+    "KNOWN_ARCHITECTURES",
+    "KVManager",
+    "ModelAnalyzer",
+    "UltraStreamingEngine",
+    "WeightManager",
+    "format_plan_report",
+    "plan_memory",
 ]
 
 __version__ = "0.2.0"
