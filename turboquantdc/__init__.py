@@ -113,6 +113,12 @@ from .ultra_streaming import (
     plan_memory,
 )
 
+# Triton WHT kernel (lazy import — only available when CUDA + Triton present)
+try:
+    from .triton_kernels import triton_wht_rotate, triton_wht_unrotate
+except ImportError:
+    pass
+
 
 def run_model(
     model_name: str = "meta-llama/Llama-3.3-70B-Instruct",
@@ -260,6 +266,9 @@ __all__ = [
     "measure_cross_layer_kv_correlation",
     "measure_distribution_similarity",
     "correlation_report",
+    # Triton WHT Kernel
+    "triton_wht_rotate",
+    "triton_wht_unrotate",
 ]
 
 __version__ = "0.2.0"

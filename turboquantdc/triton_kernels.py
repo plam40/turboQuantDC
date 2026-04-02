@@ -26,7 +26,7 @@ import triton
 import triton.language as tl
 
 from .codebook import LloydMaxCodebook
-from .rotation import generate_qjl_matrix, generate_rotation_matrix
+from .rotation import generate_qjl_matrix, generate_rotation_matrix, fast_wht
 
 
 # ---------------------------------------------------------------------------
@@ -258,6 +258,63 @@ def _dequantize_kernel(
 
 
 # ---------------------------------------------------------------------------
+# Kernel 3b: Fused Dequantize with Residual Correction
+# ---------------------------------------------------------------------------
+
+
+@triton.jit
+def _dequantize_residual_kernel(
+    indices_ptr,        # (batch, d) int32
+    centroids_ptr,      # (n_centroids,) float32
+    R_ptr,              # (d, d) float32, contiguous row-major
+    vec_norm_ptr,       # (batch,) float32
+    res_signs_ptr,      # (batch, d) float32 {-1, 0, +1}
+    res_scale_ptr,      # (batch,) float32
+    output_ptr,         # (batch, d) float32
+    # Dimensions
+    d: tl.constexpr,
+    n_centroids: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+):
+    """Fused dequantize with residual correction.
+
+    Each program handles one vector:
+        y_corrected = centroids[indices] + res_signs * res_scale
+        x_hat = vec_norm * (y_corrected @ R)
+
+    The residual correction is applied in the rotated domain (before inverse
+    rotation), matching the algebraic identity used by _dequantize_vectors_fused.
+    """
+    pid = tl.program_id(0)
+
+    d_offs = tl.arange(0, BLOCK_D)
+    d_mask = d_offs < d
+
+    # ---- Centroid lookup ----
+    idx = tl.load(indices_ptr + pid * d + d_offs, mask=d_mask, other=0)
+    y_hat = tl.load(centroids_ptr + idx, mask=d_mask, other=0.0)
+
+    # ---- Residual correction in rotated space ----
+    signs = tl.load(res_signs_ptr + pid * d + d_offs, mask=d_mask, other=0.0)
+    scale = tl.load(res_scale_ptr + pid)
+    y_hat = y_hat + signs * scale
+
+    # ---- Inverse rotation: x[j] = sum_k y_hat[k] * R[k, j] ----
+    r_block = tl.load(
+        R_ptr + d_offs[:, None] * d + d_offs[None, :],
+        mask=d_mask[:, None] & d_mask[None, :],
+        other=0.0,
+    )
+    x_hat = tl.sum(r_block * y_hat[:, None], axis=0)
+
+    # Rescale by corrected norm
+    vn = tl.load(vec_norm_ptr + pid)
+    x_hat = x_hat * vn
+
+    tl.store(output_ptr + pid * d + d_offs, x_hat, mask=d_mask)
+
+
+# ---------------------------------------------------------------------------
 # Python wrappers
 # ---------------------------------------------------------------------------
 
@@ -393,6 +450,45 @@ def triton_dequantize(
 
     _dequantize_kernel[(batch,)](
         indices, centroids, R, vec_norms, output,
+        d, n_cent,
+        BLOCK_D=BLOCK_D,
+    )
+    return output
+
+
+def triton_dequantize_residual(
+    indices: torch.Tensor,
+    centroids: torch.Tensor,
+    R: torch.Tensor,
+    vec_norms: torch.Tensor,
+    res_signs: torch.Tensor,
+    res_scale: torch.Tensor,
+) -> torch.Tensor:
+    """Fused dequantize with residual correction using Triton kernel.
+
+    Fuses centroid lookup + residual correction + inverse rotation + rescale
+    into a single kernel launch.  The residual correction is applied in the
+    rotated domain (before inverse rotation).
+
+    Args:
+        indices: (batch, d) int32 MSE codebook indices.
+        centroids: (n_centroids,) centroid values.
+        R: (d, d) rotation matrix, contiguous.
+        vec_norms: (batch,) corrected norms.
+        res_signs: (batch, d) float32 residual signs {-1, 0, +1}.
+        res_scale: (batch,) float32 residual scales.
+
+    Returns:
+        (batch, d) dequantized and rescaled vectors.
+    """
+    batch, d = indices.shape
+    n_cent = centroids.shape[0]
+    BLOCK_D = _next_power_of_2(d)
+
+    output = torch.empty(batch, d, dtype=torch.float32, device=indices.device)
+
+    _dequantize_residual_kernel[(batch,)](
+        indices, centroids, R, vec_norms, res_signs, res_scale, output,
         d, n_cent,
         BLOCK_D=BLOCK_D,
     )
@@ -558,3 +654,289 @@ class TritonTurboQuant:
         if vec_norms.dim() == 0:
             return x_hat * vec_norms
         return x_hat * vec_norms.unsqueeze(-1)
+
+
+# ---------------------------------------------------------------------------
+# Kernel 4: Fused Walsh-Hadamard Transform with random sign flipping
+# ---------------------------------------------------------------------------
+#
+# The WHT butterfly is O(d log d) vs O(d^2) for dense rotation.
+# Each thread block processes one vector, entirely in registers.
+#
+# Approach: For each butterfly stage h = 1, 2, 4, ..., d/2:
+#   partner[i] = i XOR h
+#   if i & h == 0:  x[i] = x[i] + x[partner]  (sum half)
+#   else:           x[i] = x[partner] - x[i]   (diff half)
+#
+# Since Triton doesn't support in-place register updates within a single
+# tile expression, we use the pattern:
+#   x_partner = gather x by XOR indices
+#   x_new = where(is_lo, x + x_partner, x_partner - x)
+#
+# The loop must be unrolled with tl.constexpr bounds. We unroll up to
+# log2(512) = 9 stages, which covers d up to 512 (our max head dim).
+# ---------------------------------------------------------------------------
+
+
+@triton.jit
+def _wht_butterfly_stage(x, offs, h: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+    """Execute one butterfly stage of the Walsh-Hadamard Transform.
+
+    For stride h, pairs (i, i XOR h) perform:
+      lo = x[i] + x[i^h]     when i & h == 0
+      hi = x[i^h] - x[i]     when i & h != 0
+
+    This is equivalent to the standard butterfly but expressed as a
+    parallel map over all indices.
+    """
+    partner = offs ^ h
+    # Gather partner values. Since the full vector is in the register tile,
+    # we reindex via tl.load-from-tensor pattern. Triton does not support
+    # arbitrary register gather, so we store to SRAM and reload.
+    # However, for constexpr BLOCK_SIZE Triton can optimize this.
+    #
+    # The key insight: x[partner] for ALL indices simultaneously.
+    # We cannot index a register tile by another tile. Instead we
+    # must go through shared memory (pointer-based load/store).
+    # But we already have x loaded — we need a data exchange.
+    #
+    # Triton pattern for butterfly: use the "where" merge approach.
+    # For each pair (lo_idx, hi_idx) where hi_idx = lo_idx ^ h:
+    #   new[lo_idx] = old[lo_idx] + old[hi_idx]
+    #   new[hi_idx] = old[lo_idx] - old[hi_idx]
+    #
+    # Expressed in terms of ALL indices i:
+    #   is_lo = (i & h) == 0
+    #   partner_val = <need to get x[i ^ h]>
+    #   new[i] = where(is_lo, x[i] + partner_val, partner_val - x[i])
+    #
+    # The challenge is getting partner_val. In Triton, within a single
+    # block, we can use tl.load from a shared memory pointer that we
+    # wrote to earlier. This is the standard pattern for permutations.
+    is_lo = (offs & h) == 0
+    return is_lo, partner
+
+
+@triton.jit
+def _wht_kernel(
+    x_ptr,              # (batch, d) input, float32, contiguous
+    out_ptr,            # (batch, d) output, float32, contiguous
+    signs_ptr,          # (d,) random signs {-1, +1}
+    batch_size,
+    inv: tl.constexpr,  # 0 = forward, 1 = inverse
+    d: tl.constexpr,
+    log_d: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """Fused randomized Walsh-Hadamard Transform.
+
+    Forward:  out = WHT(signs * x) / sqrt(d)
+    Inverse:  out = signs * WHT(x) / sqrt(d)
+
+    Each program processes one vector. The entire d-dimensional vector
+    fits in a BLOCK_SIZE register tile (BLOCK_SIZE >= d, power of 2).
+    Butterfly stages use scratch memory for the partner exchange.
+    """
+    pid = tl.program_id(0)
+    if pid >= batch_size:
+        return
+
+    offs = tl.arange(0, BLOCK_SIZE)
+    mask = offs < d
+
+    # Load input vector
+    x = tl.load(x_ptr + pid * d + offs, mask=mask, other=0.0)
+
+    # Load signs
+    s = tl.load(signs_ptr + offs, mask=mask, other=1.0)
+
+    if inv == 0:
+        # Forward: apply signs first, then WHT
+        x = x * s
+    # else: for inverse, apply WHT first, then signs (after the loop)
+
+    # --- Butterfly stages ---
+    # Unrolled up to 9 stages (d <= 512).
+    # Each stage: h = 1, 2, 4, ..., d/2
+    # We use scratch pointer (out_ptr row for this pid) as exchange buffer.
+    scratch_base = out_ptr + pid * d
+
+    # Stage with h = 1
+    if log_d > 0:
+        tl.store(scratch_base + offs, x, mask=mask)
+        partner_offs = offs ^ 1
+        x_partner = tl.load(scratch_base + partner_offs, mask=partner_offs < d, other=0.0)
+        is_lo = (offs & 1) == 0
+        x = tl.where(is_lo, x + x_partner, x_partner - x)
+
+    # Stage with h = 2
+    if log_d > 1:
+        tl.store(scratch_base + offs, x, mask=mask)
+        partner_offs = offs ^ 2
+        x_partner = tl.load(scratch_base + partner_offs, mask=partner_offs < d, other=0.0)
+        is_lo = (offs & 2) == 0
+        x = tl.where(is_lo, x + x_partner, x_partner - x)
+
+    # Stage with h = 4
+    if log_d > 2:
+        tl.store(scratch_base + offs, x, mask=mask)
+        partner_offs = offs ^ 4
+        x_partner = tl.load(scratch_base + partner_offs, mask=partner_offs < d, other=0.0)
+        is_lo = (offs & 4) == 0
+        x = tl.where(is_lo, x + x_partner, x_partner - x)
+
+    # Stage with h = 8
+    if log_d > 3:
+        tl.store(scratch_base + offs, x, mask=mask)
+        partner_offs = offs ^ 8
+        x_partner = tl.load(scratch_base + partner_offs, mask=partner_offs < d, other=0.0)
+        is_lo = (offs & 8) == 0
+        x = tl.where(is_lo, x + x_partner, x_partner - x)
+
+    # Stage with h = 16
+    if log_d > 4:
+        tl.store(scratch_base + offs, x, mask=mask)
+        partner_offs = offs ^ 16
+        x_partner = tl.load(scratch_base + partner_offs, mask=partner_offs < d, other=0.0)
+        is_lo = (offs & 16) == 0
+        x = tl.where(is_lo, x + x_partner, x_partner - x)
+
+    # Stage with h = 32
+    if log_d > 5:
+        tl.store(scratch_base + offs, x, mask=mask)
+        partner_offs = offs ^ 32
+        x_partner = tl.load(scratch_base + partner_offs, mask=partner_offs < d, other=0.0)
+        is_lo = (offs & 32) == 0
+        x = tl.where(is_lo, x + x_partner, x_partner - x)
+
+    # Stage with h = 64
+    if log_d > 6:
+        tl.store(scratch_base + offs, x, mask=mask)
+        partner_offs = offs ^ 64
+        x_partner = tl.load(scratch_base + partner_offs, mask=partner_offs < d, other=0.0)
+        is_lo = (offs & 64) == 0
+        x = tl.where(is_lo, x + x_partner, x_partner - x)
+
+    # Stage with h = 128
+    if log_d > 7:
+        tl.store(scratch_base + offs, x, mask=mask)
+        partner_offs = offs ^ 128
+        x_partner = tl.load(scratch_base + partner_offs, mask=partner_offs < d, other=0.0)
+        is_lo = (offs & 128) == 0
+        x = tl.where(is_lo, x + x_partner, x_partner - x)
+
+    # Stage with h = 256
+    if log_d > 8:
+        tl.store(scratch_base + offs, x, mask=mask)
+        partner_offs = offs ^ 256
+        x_partner = tl.load(scratch_base + partner_offs, mask=partner_offs < d, other=0.0)
+        is_lo = (offs & 256) == 0
+        x = tl.where(is_lo, x + x_partner, x_partner - x)
+
+    # Normalize by 1/sqrt(d)
+    d_float = d + 0.0  # promote constexpr int to float
+    x = x * (1.0 / tl.sqrt(d_float))
+
+    if inv == 1:
+        # Inverse: apply signs after WHT
+        x = x * s
+
+    # Store result
+    tl.store(out_ptr + pid * d + offs, x, mask=mask)
+
+
+# ---------------------------------------------------------------------------
+# WHT Python wrappers
+# ---------------------------------------------------------------------------
+
+
+def _log2_int(n: int) -> int:
+    """Compute floor(log2(n)) for positive power-of-2 n."""
+    assert n > 0 and (n & (n - 1)) == 0, f"n must be power of 2, got {n}"
+    r = 0
+    while (1 << r) < n:
+        r += 1
+    return r
+
+
+def triton_wht_rotate(
+    x: torch.Tensor,
+    signs: torch.Tensor,
+) -> torch.Tensor:
+    """Apply forward randomized WHT rotation using Triton kernel.
+
+    Computes: out = WHT(signs * x) / sqrt(d)
+
+    This is equivalent to apply_wht_rotation(x, wht_params, inverse=False)
+    but runs as a single fused Triton kernel.
+
+    Args:
+        x: Input tensor, shape (batch, d) or (..., d). Must be on CUDA.
+           Last dimension d must be a power of 2.
+        signs: Random sign vector of shape (d,), values in {-1, +1}.
+
+    Returns:
+        Rotated tensor, same shape as x.
+    """
+    orig_shape = x.shape
+    d = x.shape[-1]
+    x_flat = x.reshape(-1, d).contiguous()
+    batch = x_flat.shape[0]
+    log_d = _log2_int(d)
+    BLOCK_SIZE = _next_power_of_2(d)
+
+    out = torch.empty_like(x_flat)
+
+    _wht_kernel[(batch,)](
+        x_flat, out, signs.contiguous(),
+        batch,
+        inv=0,
+        d=d,
+        log_d=log_d,
+        BLOCK_SIZE=BLOCK_SIZE,
+    )
+
+    return out.reshape(orig_shape)
+
+
+def triton_wht_unrotate(
+    y: torch.Tensor,
+    signs: torch.Tensor,
+) -> torch.Tensor:
+    """Apply inverse randomized WHT rotation using Triton kernel.
+
+    Computes: out = signs * WHT(y) / sqrt(d)
+
+    This is equivalent to apply_wht_rotation(y, wht_params, inverse=True)
+    but runs as a single fused Triton kernel.
+
+    The WHT is its own inverse (up to normalization): H @ H = d * I.
+    So a single application of H/sqrt(d) followed by sign unflipping
+    recovers the original vector.
+
+    Args:
+        y: Rotated tensor, shape (batch, d) or (..., d). Must be on CUDA.
+        signs: Random sign vector of shape (d,), values in {-1, +1}.
+
+    Returns:
+        Unrotated tensor, same shape as y.
+    """
+    orig_shape = y.shape
+    d = y.shape[-1]
+    y_flat = y.reshape(-1, d).contiguous()
+    batch = y_flat.shape[0]
+    log_d = _log2_int(d)
+    BLOCK_SIZE = _next_power_of_2(d)
+
+    out = torch.empty_like(y_flat)
+
+    _wht_kernel[(batch,)](
+        y_flat, out, signs.contiguous(),
+        batch,
+        inv=1,
+        d=d,
+        log_d=log_d,
+        BLOCK_SIZE=BLOCK_SIZE,
+    )
+
+    return out.reshape(orig_shape)

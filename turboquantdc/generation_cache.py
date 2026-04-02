@@ -36,9 +36,25 @@ import torch
 from .codebook import LloydMaxCodebook
 from .rotation import (
     apply_wht_rotation,
+    generate_qjl_matrix,
     generate_rotation_matrix,
     generate_wht_rotation,
 )
+
+# Triton availability check — graceful fallback to Python on non-CUDA systems
+_TRITON_AVAILABLE = False
+try:
+    from .triton_kernels import triton_quantize as _triton_quantize
+
+    _TRITON_AVAILABLE = True
+except (ImportError, RuntimeError):
+    pass
+
+# Triton fused dequantize kernels — extend the same availability flag
+try:
+    from .triton_kernels import triton_dequantize, triton_dequantize_residual
+except (ImportError, RuntimeError):
+    pass
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +174,10 @@ class _CompressedLayer:
         use_residual_quant: Whether to apply 1-bit residual sign correction
             to keys during dequantization. When False, only the MSE centroid
             reconstruction is used (no residual correction).
+        use_triton: Use Triton fused kernel for quantization when available.
+            Default ``True`` if Triton is importable and CUDA is present.
+            Falls back to Python when the rotation type is WHT or the
+            tensors are not on CUDA.
     """
 
     def __init__(
@@ -169,6 +189,7 @@ class _CompressedLayer:
         use_norm_correction: bool = True,
         use_residual_quant: bool = True,
         rotation_type: str | None = None,
+        use_triton: bool = _TRITON_AVAILABLE,
     ):
         self.key_bits = key_bits
         self.val_bits = val_bits
@@ -178,6 +199,7 @@ class _CompressedLayer:
         self.use_residual_quant = use_residual_quant
         # None = auto-select (WHT when d is power of 2, else QR)
         self._rotation_type_override = rotation_type
+        self._use_triton = use_triton and _TRITON_AVAILABLE
 
         self._seq_len: int = 0
 
@@ -192,6 +214,11 @@ class _CompressedLayer:
         self._wht_params: Optional[dict] = None  # WHT sign vector (WHT only)
         self._key_codebook: Optional[LloydMaxCodebook] = None
         self._val_codebook: Optional[LloydMaxCodebook] = None
+        # Triton path: precomputed SR = S @ R^T for fused QJL (QR only)
+        self._triton_S: Optional[torch.Tensor] = None
+        self._triton_key_SR: Optional[torch.Tensor] = None
+        self._triton_val_SR: Optional[torch.Tensor] = None
+        self._triton_ready: bool = False
 
         # Compressed storage (appended per update call)
         self._key_indices: List[torch.Tensor] = []
@@ -250,6 +277,25 @@ class _CompressedLayer:
         self._key_codebook = LloydMaxCodebook(d=d, bits=self.key_bits).to(device)
         self._val_codebook = LloydMaxCodebook(d=d, bits=self.val_bits).to(device)
 
+        # Triton path: precompute S and SR = S @ R^T for fused quantize kernel.
+        # Only available for QR rotation on CUDA (Triton kernel uses dense R).
+        if (
+            self._use_triton
+            and self._rotation_type == "qr"
+            and self._rotation is not None
+            and str(self._device).startswith("cuda")
+        ):
+            R = self._rotation.contiguous()
+            # QJL matrix S (m x d) with m = d
+            self._triton_S = generate_qjl_matrix(
+                d, m=d, seed=self.seed + 1, device="cpu",
+            ).contiguous().to(self._device)
+            # SR = S @ R^T  (precomputed so kernel avoids inverse rotation)
+            SR = (self._triton_S @ R.T).contiguous()
+            self._triton_key_SR = SR
+            self._triton_val_SR = SR  # same rotation, same SR
+            self._triton_ready = True
+
     # -- quantization --
 
     def _quantize_vectors(
@@ -259,10 +305,23 @@ class _CompressedLayer:
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Quantize ``[batch, heads, seq, d]`` vectors with norm + residual correction.
 
+        Dispatches to the Triton fused kernel when available (QR rotation on
+        CUDA), otherwise falls back to the pure-Python path.
+
         Returns:
             Tuple of (indices, corrected_norms, residual_signs, residual_scales),
             each reshaped back to ``[batch, heads, seq, ...]``.
         """
+        if self._triton_ready and vectors.is_cuda:
+            return self._quantize_vectors_triton(vectors, codebook)
+        return self._quantize_vectors_python(vectors, codebook)
+
+    def _quantize_vectors_python(
+        self,
+        vectors: torch.Tensor,
+        codebook: LloydMaxCodebook,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Pure-Python quantize path (original implementation)."""
         batch, heads, seq, d = vectors.shape
         flat = vectors.float().reshape(-1, d)
 
@@ -303,6 +362,65 @@ class _CompressedLayer:
             res_scale.reshape(batch, heads, seq),
         )
 
+    def _quantize_vectors_triton(
+        self,
+        vectors: torch.Tensor,
+        codebook: LloydMaxCodebook,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Triton fused quantize path: rotate + quantize in one GPU kernel.
+
+        Uses ``triton_quantize()`` for the fused rotation + boundary search,
+        then computes norm correction and residual signs from the indices.
+        The Triton kernel fuses the rotation matrix-vector product with the
+        per-coordinate quantization boundary search into a single kernel
+        launch, eliminating intermediate memory traffic.
+
+        Falls back to Python for WHT rotation (Triton kernel requires dense R).
+        """
+        batch, heads, seq, d = vectors.shape
+        flat = vectors.float().reshape(-1, d).contiguous()
+
+        # Normalize
+        norms = flat.norm(dim=-1, keepdim=True)
+        normalized = (flat / (norms + 1e-8)).contiguous()
+
+        # Determine SR matrix (same rotation for key and value codebooks)
+        SR = self._triton_key_SR
+
+        # Fused rotate + quantize via Triton kernel.
+        # Returns: indices (n, d) int32, qjl_signs (n, m), residual_norms (n,)
+        indices, _qjl_signs, _res_norms = _triton_quantize(
+            normalized,
+            self._rotation.contiguous(),
+            codebook.boundaries.contiguous(),
+            codebook.centroids.contiguous(),
+            SR,
+        )
+        indices = indices.clamp(0, codebook.centroids.shape[0] - 1)
+
+        # Post-processing: norm correction and residual signs.
+        # These are cheap gather + elementwise ops (not the bottleneck).
+        recon_rotated = codebook.centroids[indices.long()]
+        recon_unrotated = recon_rotated @ self._rotation.T
+        recon_norm = recon_unrotated.norm(dim=-1, keepdim=True)
+        corrected_norms = norms * (
+            norms / (recon_norm * norms.abs().clamp(min=1e-8) + 1e-8)
+        ).clamp(0.5, 2.0)
+
+        # Residual signs: need rotated vectors.
+        # Recompute rotation via cuBLAS (fast batched matmul, single kernel).
+        rotated = normalized @ self._rotation
+        residual = rotated - recon_rotated
+        res_signs = torch.sign(residual)
+        res_scale = residual.abs().mean(dim=-1, keepdim=True)
+
+        return (
+            indices.reshape(batch, heads, seq, d),
+            corrected_norms.reshape(batch, heads, seq),
+            res_signs.reshape(batch, heads, seq, d),
+            res_scale.reshape(batch, heads, seq),
+        )
+
     def _dequantize_vectors(
         self,
         indices: torch.Tensor,
@@ -312,6 +430,10 @@ class _CompressedLayer:
         res_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Reconstruct vectors from compressed representation.
+
+        When Triton is available and the rotation type is QR on a CUDA device,
+        dispatches to the fused Triton dequantize kernel.  Falls back to
+        PyTorch for WHT rotation or CPU tensors.
 
         Args:
             indices: ``[batch, heads, seq, d]`` centroid indices.
@@ -327,6 +449,37 @@ class _CompressedLayer:
         flat_idx = indices.reshape(-1, d)
         flat_norms = norms.reshape(-1)
 
+        # --- Triton fused path (QR rotation on CUDA) ---
+        is_cuda = self._device is not None and self._device.type == "cuda"
+        use_triton = (
+            _TRITON_AVAILABLE
+            and is_cuda
+            and self._rotation_type == "qr"
+            and self._rotation is not None
+        )
+
+        if use_triton:
+            flat_idx_i32 = flat_idx.to(torch.int32).contiguous()
+            centroids_f32 = codebook.centroids.float().contiguous()
+            # The Triton kernel computes y_hat @ R_arg; the GenerationCache
+            # convention is forward=x@R, inverse=y@R^T, so pass R^T.
+            Rt_f32 = self._rotation.float().T.contiguous()
+            flat_norms_f32 = flat_norms.float().contiguous()
+
+            if res_signs is not None and res_scale is not None:
+                flat_signs = res_signs.float().reshape(-1, d).contiguous()
+                flat_scale = res_scale.float().reshape(-1).contiguous()
+                reconstructed = triton_dequantize_residual(
+                    flat_idx_i32, centroids_f32, Rt_f32, flat_norms_f32,
+                    flat_signs, flat_scale,
+                )
+            else:
+                reconstructed = triton_dequantize(
+                    flat_idx_i32, centroids_f32, Rt_f32, flat_norms_f32,
+                )
+            return reconstructed.reshape(batch, heads, seq, d)
+
+        # --- PyTorch fallback (WHT rotation or CPU) ---
         reconstructed = codebook.centroids[flat_idx]
 
         # Apply residual correction
@@ -512,6 +665,11 @@ class _CompressedLayer:
         Norm correction (original_norm / reconstruction_norm) is applied
         when ``self.use_norm_correction`` is True.
 
+        When Triton is available and the rotation type is QR on a CUDA device,
+        the centroid lookup + residual correction + inverse rotation + rescale
+        are fused into a single Triton kernel launch for significant speedup.
+        The WHT rotation path falls back to PyTorch (WHT is already O(d log d)).
+
         Args:
             indices: ``[batch, heads, seq, d]`` centroid indices.
             norms: ``[batch, heads, seq]`` corrected norms.
@@ -526,6 +684,37 @@ class _CompressedLayer:
         flat_idx = indices.reshape(-1, d)
         flat_norms = norms.reshape(-1)
 
+        # --- Triton fused path (QR rotation on CUDA) ---
+        is_cuda = self._device is not None and self._device.type == "cuda"
+        use_triton = (
+            _TRITON_AVAILABLE
+            and is_cuda
+            and self._rotation_type == "qr"
+            and self._rotation is not None
+        )
+
+        if use_triton:
+            flat_idx_i32 = flat_idx.to(torch.int32).contiguous()
+            centroids_f32 = codebook.centroids.float().contiguous()
+            # The Triton kernel computes y_hat @ R_arg; the GenerationCache
+            # convention is forward=x@R, inverse=y@R^T, so pass R^T.
+            Rt_f32 = self._rotation.float().T.contiguous()
+            flat_norms_f32 = flat_norms.float().contiguous()
+
+            if res_signs is not None and res_scale is not None:
+                flat_signs = res_signs.float().reshape(-1, d).contiguous()
+                flat_scale = res_scale.float().reshape(-1).contiguous()
+                reconstructed = triton_dequantize_residual(
+                    flat_idx_i32, centroids_f32, Rt_f32, flat_norms_f32,
+                    flat_signs, flat_scale,
+                )
+            else:
+                reconstructed = triton_dequantize(
+                    flat_idx_i32, centroids_f32, Rt_f32, flat_norms_f32,
+                )
+            return reconstructed.reshape(batch, heads, seq, d)
+
+        # --- PyTorch fallback (WHT rotation or CPU) ---
         # Gather centroids in float32 (the fused path core)
         reconstructed = codebook.centroids.float()[flat_idx.long()]
 
@@ -827,6 +1016,9 @@ class GenerationCache:
         use_residual_quant: Whether to apply 1-bit residual sign correction
             to keys during dequantization. When False, only MSE centroid
             reconstruction is used. Default: True.
+        use_triton: Use Triton fused kernel for quantization when available.
+            Default ``True`` if Triton is importable and CUDA is present.
+            Falls back to Python for WHT rotation or non-CUDA devices.
     """
 
     # Quality presets from 246-config autoresearch sweep.
@@ -889,6 +1081,7 @@ class GenerationCache:
         use_norm_correction: bool = True,
         use_residual_quant: bool = True,
         rotation_type: str | None = None,
+        use_triton: bool = _TRITON_AVAILABLE,
     ):
         if not (1 <= key_bits <= 8):
             raise ValueError(f"key_bits must be 1-8, got {key_bits}")
@@ -916,6 +1109,7 @@ class GenerationCache:
         self.use_norm_correction = use_norm_correction
         self.use_residual_quant = use_residual_quant
         self.rotation_type = rotation_type  # None = auto (WHT for power-of-2 d)
+        self.use_triton = use_triton
 
         # Pre-compute anchor schedule when num_layers is known
         self._anchor_schedule: Optional[List[Tuple[bool, int]]] = None
@@ -982,6 +1176,7 @@ class GenerationCache:
             use_norm_correction=self.use_norm_correction,
             use_residual_quant=self.use_residual_quant,
             rotation_type=self.rotation_type,
+            use_triton=self.use_triton,
         )
 
     # ---- HF Cache protocol ----
