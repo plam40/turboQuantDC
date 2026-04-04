@@ -1,37 +1,57 @@
-"""TurboQuantDC — TurboQuant KV cache compression for LLMs.
+"""TurboQuantDC -- TurboQuant KV cache compression for LLMs.
 
 A from-scratch implementation of Google's TurboQuant algorithm (ICLR 2026)
 for compressing key-value caches to 3-bit with <0.5% attention quality loss.
 
 Modules:
-    codebook         — Lloyd-Max optimal scalar quantizer
-    rotation         — Random orthogonal rotation and QJL projection matrices
-    polarquant       — Stage 1: MSE-optimal vector quantization
-    qjl              — Stage 2: 1-bit QJL bias correction
-    estimator        — Combined unbiased inner product estimator
-    kv_cache         — Drop-in compressed KV cache wrapper
-    vllm_integration — vLLM attention backend and cache manager
+    codebook         -- Lloyd-Max optimal scalar quantizer
+    rotation         -- Random orthogonal rotation and QJL projection matrices
+    polarquant       -- Stage 1: MSE-optimal vector quantization
+    qjl              -- Stage 2: 1-bit QJL bias correction
+    estimator        -- Combined unbiased inner product estimator
+    kv_cache         -- Drop-in compressed KV cache wrapper
+    vllm_integration -- vLLM attention backend and cache manager
 """
 
+__version__ = "0.2.0"
+
+import sys
+
+_MIN_PYTHON = (3, 10)
+if sys.version_info < _MIN_PYTHON:
+    raise RuntimeError(
+        f"TurboQuantDC requires Python {_MIN_PYTHON[0]}.{_MIN_PYTHON[1]}+, "
+        f"but you are running {sys.version_info.major}.{sys.version_info.minor}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Helper for optional dependency errors
+# ---------------------------------------------------------------------------
+def _optional_import_error(module_name: str, extra: str, pkg: str) -> None:
+    """Raise an ImportError with install instructions for an optional dep."""
+    raise ImportError(
+        f"'{module_name}' requires '{pkg}' which is not installed. "
+        f"Install it with:  pip install turboquantdc[{extra}]"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Core modules (always available -- depend only on torch + scipy)
+# ---------------------------------------------------------------------------
 from .codebook import LloydMaxCodebook, beta_pdf, gaussian_pdf, solve_lloyd_max
 from .estimator import TurboQuantEstimator
 from .kv_cache import TurboQuantKVCache
 from .polarquant import PolarQuant
 from .qjl import QJL
 from .rotation import generate_qjl_matrix, generate_rotation_matrix
-from .vllm_integration import (
-    TurboQuantAttentionBackend,
-    TurboQuantCacheManager,
-    get_turboquant_config,
-)
 
-# Phase 5: Beyond the Paper
+# Phase 5: Beyond the Paper -- core extensions (torch-only)
 from .rotation import apply_wht_rotation, fast_wht, generate_wht_rotation
 from .sparse_v import SparseVAttention, sparse_attention
 from .outlier import OutlierTurboQuant
 from .layer_adaptive import FP16Cache, LayerAdaptiveKVCache, estimate_memory, recommended_schedule
 from .temporal_decay import TemporalDecayCache
-from .hf_integration import TurboQuantCache
 from .custom_attention import turboquant_attention, patch_model_attention
 from .fused_attention import (
     fused_turboquant_attention,
@@ -91,17 +111,37 @@ from .weight_compression import (
     effective_bpw,
     estimate_compressed_size,
 )
-from .streaming_70b import (
-    AsyncPrefetcher,
-    LayerGPUCache,
-    MemoryPlanner,
-    StreamingModel,
-)
 from .cross_layer_kv import (
     CrossLayerKVCache,
     measure_cross_layer_kv_correlation,
     measure_distribution_similarity,
     correlation_report,
+)
+
+# ---------------------------------------------------------------------------
+# HuggingFace integration (transformers imported lazily inside the module,
+# so importing the *class* here is safe -- it only fails when you actually
+# instantiate it without transformers installed)
+# ---------------------------------------------------------------------------
+from .hf_integration import TurboQuantCache
+
+# ---------------------------------------------------------------------------
+# vLLM integration (vLLM imported lazily inside the module)
+# ---------------------------------------------------------------------------
+from .vllm_integration import (
+    TurboQuantAttentionBackend,
+    TurboQuantCacheManager,
+    get_turboquant_config,
+)
+
+# ---------------------------------------------------------------------------
+# Streaming 70B / Ultra-Streaming (transformers imported lazily inside)
+# ---------------------------------------------------------------------------
+from .streaming_70b import (
+    AsyncPrefetcher,
+    LayerGPUCache,
+    MemoryPlanner,
+    StreamingModel,
 )
 from .ultra_streaming import (
     KNOWN_ARCHITECTURES,
@@ -113,11 +153,28 @@ from .ultra_streaming import (
     plan_memory,
 )
 
-# Triton WHT kernel (lazy import — only available when CUDA + Triton present)
+# ---------------------------------------------------------------------------
+# Triton kernels (optional -- requires triton + CUDA)
+# ---------------------------------------------------------------------------
 try:
-    from .triton_kernels import triton_wht_rotate, triton_wht_unrotate
-except ImportError:
-    pass
+    from .triton_kernels import (
+        TritonTurboQuant,
+        triton_wht_rotate,
+        triton_wht_unrotate,
+    )
+except (ImportError, RuntimeError):
+    # Provide a stub that gives a helpful error when someone tries to use it
+    def _triton_not_available(*args, **kwargs):
+        _optional_import_error("triton_kernels", "triton", "triton")
+
+    class TritonTurboQuant:  # type: ignore[no-redef]
+        """Stub -- triton is not installed."""
+
+        def __init__(self, *args, **kwargs):
+            _optional_import_error("TritonTurboQuant", "triton", "triton")
+
+    triton_wht_rotate = _triton_not_available  # type: ignore[assignment]
+    triton_wht_unrotate = _triton_not_available  # type: ignore[assignment]
 
 
 def run_model(
@@ -147,6 +204,8 @@ def run_model(
 
 
 __all__ = [
+    # Version
+    "__version__",
     # Codebook
     "beta_pdf",
     "gaussian_pdf",
@@ -266,9 +325,8 @@ __all__ = [
     "measure_cross_layer_kv_correlation",
     "measure_distribution_similarity",
     "correlation_report",
-    # Triton WHT Kernel
+    # Triton Kernels (optional)
+    "TritonTurboQuant",
     "triton_wht_rotate",
     "triton_wht_unrotate",
 ]
-
-__version__ = "0.2.0"

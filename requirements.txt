@@ -1,3 +1,3 @@
-# Core dependencies
+# Core dependencies (bare install)
 torch>=2.0.0
-scipy>=1.10.0
+scipy>=1.10.0,<1.15.0

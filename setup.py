@@ -3,6 +3,35 @@ from setuptools import setup, find_packages
 with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
 
+_base = [
+    "torch>=2.0.0",
+    "scipy>=1.10.0,<1.15.0",
+]
+
+_hf = [
+    "transformers>=4.40.0",
+    "accelerate>=0.25.0",
+]
+
+_bnb = [
+    "bitsandbytes>=0.43.0",
+]
+
+_triton = [
+    "triton>=3.0.0",
+]
+
+_benchmark = [
+    "datasets",
+    "matplotlib",
+    "tqdm",
+]
+
+_dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+]
+
 setup(
     name="turboquantdc",
     version="0.2.0",
@@ -23,20 +52,15 @@ setup(
     ],
     license="MIT",
     python_requires=">=3.10",
-    install_requires=[
-        "torch>=2.0.0",
-        "scipy>=1.10.0",
-    ],
+    install_requires=_base,
     extras_require={
-        "benchmark": [
-            "transformers>=4.40.0",
-            "accelerate>=0.25.0",
-            "bitsandbytes>=0.43.0",
-        ],
-        "dev": [
-            "pytest>=7.0.0",
-            "pytest-cov>=4.0.0",
-        ],
+        "base": _base,
+        "hf": _hf,
+        "bnb": _bnb,
+        "triton": _triton,
+        "benchmark": _benchmark,
+        "all": _base + _hf + _bnb + _triton + _benchmark,
+        "dev": _dev,
     },
     keywords=[
         "llm", "kv-cache", "quantization", "compression",

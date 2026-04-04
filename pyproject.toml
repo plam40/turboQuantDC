@@ -34,19 +34,43 @@ classifiers = [
 ]
 dependencies = [
     "torch>=2.0.0",
-    "scipy>=1.10.0",
+    "scipy>=1.10.0,<1.15.0",
 ]
 
 [project.optional-dependencies]
+base = [
+    "torch>=2.0.0",
+    "scipy>=1.10.0,<1.15.0",
+]
+hf = [
+    "transformers>=4.40.0",
+    "accelerate>=0.25.0",
+]
+bnb = [
+    "bitsandbytes>=0.43.0",
+]
+triton = [
+    "triton>=3.0.0",
+]
 benchmark = [
+    "datasets",
+    "matplotlib",
+    "tqdm",
+]
+all = [
+    "torch>=2.0.0",
+    "scipy>=1.10.0,<1.15.0",
     "transformers>=4.40.0",
     "accelerate>=0.25.0",
     "bitsandbytes>=0.43.0",
+    "triton>=3.0.0",
+    "datasets",
+    "matplotlib",
+    "tqdm",
 ]
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
-    "ruff>=0.4.0",
 ]
 
 [project.urls]
