@@ -34,12 +34,40 @@ Reference: TurboQuant paper (arxiv 2504.19874).
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 import torch
 
 from .estimator import TurboQuantEstimator
 from .polarquant import PolarQuant
+
+
+# ---------------------------------------------------------------------------
+# Utility: strip HF-injected internal attributes from parameter dicts
+# ---------------------------------------------------------------------------
+
+# Attributes injected by transformers >= 5.3.0 that bitsandbytes param
+# constructors (Params4bit, Int8Params) reject as unexpected kwargs.
+_HF_INTERNAL_ATTRS: Set[str] = {
+    "_is_hf_initialized",
+    "_hf_hook",
+    "_old_forward",
+}
+
+
+def _clean_param_dict(param: torch.nn.Parameter) -> dict:
+    """Return a copy of ``param.__dict__`` without HF-injected internals.
+
+    When HuggingFace transformers >= 5.3.0 initializes a model, it stamps
+    parameters with ``_is_hf_initialized = True``.  If ``accelerate`` then
+    passes ``param.__dict__`` to a bitsandbytes parameter constructor
+    (``Params4bit.__new__()`` or ``Int8Params.__new__()``), the extra key
+    causes a ``TypeError``.
+
+    Call this before passing parameter dicts to BnB or any other library
+    that does not expect HF-internal keys.
+    """
+    return {k: v for k, v in param.__dict__.items() if k not in _HF_INTERNAL_ATTRS}
 
 
 class TurboQuantLayer:
@@ -62,6 +90,13 @@ class TurboQuantLayer:
         self.seed = seed
         self.mse_only = mse_only  # Skip QJL, use full b-bit MSE for keys
         self._seq_len: int = 0
+
+        # Offset tracking for streaming / eviction scenarios.
+        # When tokens are evicted from the front of the sequence, the mask
+        # must know the offset so that it does not attend to dead positions.
+        # ``_kv_offset`` counts the total number of evicted tokens so that
+        # ``get_mask_sizes`` returns the correct ``(kv_length, kv_offset)``.
+        self._kv_offset: int = 0
 
         # Lazily initialized on first update (need to know head_dim)
         self._key_estimators: Optional[Dict[int, TurboQuantEstimator]] = None
@@ -92,7 +127,14 @@ class TurboQuantLayer:
         self._val_pq: Optional[PolarQuant] = None
 
     def _lazy_init(self, key_states: torch.Tensor, value_states: torch.Tensor) -> None:
-        """Initialize quantizers from the first observed tensor shapes."""
+        """Initialize quantizers from the first observed tensor shapes.
+
+        Supports meta-device tensors: if ``key_states`` is on the ``meta``
+        device, we record shapes and dtype but skip allocating real quantizer
+        buffers.  Allocation is deferred to the first ``update()`` call with
+        a real (non-meta) tensor, enabling ``device_map="auto"`` for 70B+
+        models.
+        """
         # key_states: [batch, num_heads, seq_len, head_dim]
         self._batch_size = key_states.shape[0]
         self._num_heads = key_states.shape[1]
@@ -100,6 +142,21 @@ class TurboQuantLayer:
         self._dtype = key_states.dtype
         self._device = key_states.device
 
+        # Meta tensors are shape-only placeholders used by HF for large
+        # models with ``device_map="auto"``.  We cannot allocate real
+        # quantizer buffers on ``meta``, so we record the shapes and bail
+        # out.  The quantizers will be created on the first real update().
+        if key_states.device.type == "meta":
+            return
+
+        self._allocate_quantizers()
+
+    def _allocate_quantizers(self) -> None:
+        """Allocate quantizer objects on ``self._device``.
+
+        Separated from ``_lazy_init`` so that meta-device layers can defer
+        this until the first real (non-meta) update.
+        """
         d = self._head_dim
         # Codebook computation (scipy) runs on CPU internally, but the
         # resulting rotation matrices and centroids must live on the same
@@ -141,6 +198,21 @@ class TurboQuantLayer:
         """
         if self._key_est is None and self._key_pq is None:
             self._lazy_init(key_states, value_states)
+
+        # Handle meta -> real device transition.  If _lazy_init was called
+        # with a meta tensor, quantizers are not yet allocated.  Now that we
+        # have a real tensor, allocate them on the real device.
+        if self._val_pq is None and self._head_dim is not None:
+            # Shapes were recorded from a meta tensor; now we have a real one.
+            self._device = key_states.device
+            self._dtype = key_states.dtype
+            self._allocate_quantizers()
+
+        # Multi-device support: if this layer's quantizers live on a
+        # different device than the incoming tensors, move them.
+        if self._device is not None and key_states.device != self._device:
+            self._device = key_states.device
+            self._allocate_quantizers()
 
         batch, num_heads, new_seq, head_dim = key_states.shape
 
@@ -238,16 +310,52 @@ class TurboQuantLayer:
     def reorder(self, beam_idx: torch.LongTensor) -> None:
         """Reorder cache entries for beam search along the batch dimension."""
         for entry in self._key_compressed:
-            entry["mse_indices"] = entry["mse_indices"].index_select(0, beam_idx)
-            entry["qjl_signs"] = entry["qjl_signs"].index_select(0, beam_idx)
-            entry["residual_norm"] = entry["residual_norm"].index_select(0, beam_idx)
-            entry["vec_norm"] = entry["vec_norm"].index_select(0, beam_idx)
+            for key in entry:
+                entry[key] = entry[key].index_select(0, beam_idx)
         for entry in self._value_compressed:
-            entry["indices"] = entry["indices"].index_select(0, beam_idx)
-            entry["norms"] = entry["norms"].index_select(0, beam_idx)
+            for key in entry:
+                entry[key] = entry[key].index_select(0, beam_idx)
+
+    def evict_tokens(self, n_evict: int) -> None:
+        """Evict the oldest ``n_evict`` tokens from the front of the cache.
+
+        Updates ``_kv_offset`` so that ``get_mask_sizes`` can return the
+        correct offset for attention mask generation.  Without this, evicted
+        positions would still appear in the attention mask, causing the model
+        to attend to dead positions and producing garbled output.
+
+        Args:
+            n_evict: Number of tokens to evict from the front.
+        """
+        if n_evict <= 0 or self._seq_len == 0:
+            return
+        n_evict = min(n_evict, self._seq_len)
+
+        # Walk through compressed entries, dropping from the front
+        remaining_to_drop = n_evict
+        new_key_comp = []
+        new_val_comp = []
+
+        for kc, vc in zip(self._key_compressed, self._value_compressed):
+            chunk_seq = kc["mse_indices"].shape[2]
+            if remaining_to_drop >= chunk_seq:
+                remaining_to_drop -= chunk_seq
+                continue  # drop entire chunk
+            if remaining_to_drop > 0:
+                # Partial drop from front
+                kc = {k: v[:, :, remaining_to_drop:] for k, v in kc.items()}
+                vc = {k: v[:, :, remaining_to_drop:] for k, v in vc.items()}
+                remaining_to_drop = 0
+            new_key_comp.append(kc)
+            new_val_comp.append(vc)
+
+        self._key_compressed = new_key_comp
+        self._value_compressed = new_val_comp
+        self._seq_len -= n_evict
+        self._kv_offset += n_evict
 
     def crop(self, max_length: int) -> None:
-        """Truncate cached sequence to max_length tokens."""
+        """Truncate cached sequence to max_length tokens (from the tail)."""
         if max_length < 0:
             max_length = self._seq_len + max_length
         if self._seq_len <= max_length:
@@ -263,16 +371,8 @@ class TurboQuantLayer:
             if remaining <= 0:
                 break
             take = min(chunk_seq, remaining)
-            new_key_comp.append({
-                "mse_indices": kc["mse_indices"][:, :, :take],
-                "qjl_signs": kc["qjl_signs"][:, :, :take],
-                "residual_norm": kc["residual_norm"][:, :, :take],
-                "vec_norm": kc["vec_norm"][:, :, :take],
-            })
-            new_val_comp.append({
-                "indices": vc["indices"][:, :, :take],
-                "norms": vc["norms"][:, :, :take],
-            })
+            new_key_comp.append({k: v[:, :, :take] for k, v in kc.items()})
+            new_val_comp.append({k: v[:, :, :take] for k, v in vc.items()})
             remaining -= take
 
         self._key_compressed = new_key_comp
@@ -326,10 +426,11 @@ class TurboQuantLayer:
         }
 
     def clear(self) -> None:
-        """Clear all compressed data."""
+        """Clear all compressed data and reset the KV offset."""
         self._key_compressed.clear()
         self._value_compressed.clear()
         self._seq_len = 0
+        self._kv_offset = 0
 
 
 class TurboQuantCache:
@@ -406,12 +507,19 @@ class TurboQuantCache:
     def get_mask_sizes(
         self, cache_position: torch.Tensor, layer_idx: int
     ) -> tuple[int, int]:
-        """Return (kv_length, kv_offset) for mask generation."""
+        """Return ``(kv_length, kv_offset)`` for mask generation.
+
+        When tokens have been evicted from the front of the cache, the mask
+        must start at the correct offset so that attention does not target
+        dead positions.  The offset is tracked per-layer via
+        ``TurboQuantLayer._kv_offset``.
+        """
         if layer_idx >= len(self._layers):
             return cache_position.shape[0], 0
+        layer = self._layers[layer_idx]
         query_length = cache_position.shape[0]
-        kv_length = self._layers[layer_idx].get_seq_length() + query_length
-        return kv_length, 0
+        kv_length = layer.get_seq_length() + query_length + layer._kv_offset
+        return kv_length, layer._kv_offset
 
     def reorder_cache(self, beam_idx: torch.LongTensor) -> None:
         """Reorder all layers for beam search."""
@@ -436,13 +544,11 @@ class TurboQuantCache:
         """
         for layer in self._layers:
             for entry in layer._key_compressed:
-                entry["mse_indices"] = entry["mse_indices"].repeat_interleave(repeats, dim=0)
-                entry["qjl_signs"] = entry["qjl_signs"].repeat_interleave(repeats, dim=0)
-                entry["residual_norm"] = entry["residual_norm"].repeat_interleave(repeats, dim=0)
-                entry["vec_norm"] = entry["vec_norm"].repeat_interleave(repeats, dim=0)
+                for key in entry:
+                    entry[key] = entry[key].repeat_interleave(repeats, dim=0)
             for entry in layer._value_compressed:
-                entry["indices"] = entry["indices"].repeat_interleave(repeats, dim=0)
-                entry["norms"] = entry["norms"].repeat_interleave(repeats, dim=0)
+                for key in entry:
+                    entry[key] = entry[key].repeat_interleave(repeats, dim=0)
             if layer._batch_size is not None:
                 layer._batch_size *= repeats
 
@@ -450,13 +556,11 @@ class TurboQuantCache:
         """Select specific batch indices from the cache."""
         for layer in self._layers:
             for entry in layer._key_compressed:
-                entry["mse_indices"] = entry["mse_indices"][indices]
-                entry["qjl_signs"] = entry["qjl_signs"][indices]
-                entry["residual_norm"] = entry["residual_norm"][indices]
-                entry["vec_norm"] = entry["vec_norm"][indices]
+                for key in entry:
+                    entry[key] = entry[key][indices]
             for entry in layer._value_compressed:
-                entry["indices"] = entry["indices"][indices]
-                entry["norms"] = entry["norms"][indices]
+                for key in entry:
+                    entry[key] = entry[key][indices]
             if layer._batch_size is not None:
                 layer._batch_size = len(indices)
 
