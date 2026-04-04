@@ -625,3 +625,416 @@ class TestTurboQuantLayer:
         usage_20 = layer.memory_usage_bits()
 
         assert usage_20["total_bits"] == 2 * usage_10["total_bits"]
+
+
+# ---------------------------------------------------------------------------
+# Test: get_mask_sizes with offset tracking (Bug Fix #1)
+# ---------------------------------------------------------------------------
+class TestMaskSizesWithOffset:
+    """Verify get_mask_sizes returns correct offset after token eviction."""
+
+    def test_offset_zero_without_eviction(self):
+        """Without eviction, offset should remain 0."""
+        cache = TurboQuantCache(bits=3, seed=SEED)
+        keys, values = make_kv_states(seq_len=10)
+        cache.update(keys, values, layer_idx=0)
+
+        cache_position = torch.arange(1)
+        kv_length, kv_offset = cache.get_mask_sizes(cache_position, layer_idx=0)
+        assert kv_offset == 0
+        assert kv_length == 10 + 1
+
+    def test_offset_increases_after_eviction(self):
+        """After evicting tokens, offset should reflect the eviction count."""
+        cache = TurboQuantCache(bits=3, seed=SEED)
+        keys, values = make_kv_states(seq_len=20)
+        cache.update(keys, values, layer_idx=0)
+
+        # Evict 5 tokens from the front
+        cache._layers[0].evict_tokens(5)
+        assert cache._layers[0]._kv_offset == 5
+        assert cache._layers[0].get_seq_length() == 15
+
+        cache_position = torch.arange(1)
+        kv_length, kv_offset = cache.get_mask_sizes(cache_position, layer_idx=0)
+        assert kv_offset == 5
+        # kv_length = seq_len(15) + query(1) + offset(5) = 21
+        assert kv_length == 15 + 1 + 5
+
+    def test_offset_accumulates_across_evictions(self):
+        """Multiple evictions should accumulate the offset."""
+        cache = TurboQuantCache(bits=3, seed=SEED)
+        keys, values = make_kv_states(seq_len=30)
+        cache.update(keys, values, layer_idx=0)
+
+        cache._layers[0].evict_tokens(5)
+        cache._layers[0].evict_tokens(10)
+        assert cache._layers[0]._kv_offset == 15
+        assert cache._layers[0].get_seq_length() == 15
+
+    def test_offset_resets_on_clear(self):
+        """clear() should reset both seq_len and offset to 0."""
+        cache = TurboQuantCache(bits=3, seed=SEED)
+        keys, values = make_kv_states(seq_len=20)
+        cache.update(keys, values, layer_idx=0)
+        cache._layers[0].evict_tokens(10)
+        assert cache._layers[0]._kv_offset == 10
+
+        cache._layers[0].clear()
+        assert cache._layers[0]._kv_offset == 0
+        assert cache._layers[0].get_seq_length() == 0
+
+    def test_evict_clamps_to_seq_len(self):
+        """Evicting more tokens than exist should not go negative."""
+        cache = TurboQuantCache(bits=3, seed=SEED)
+        keys, values = make_kv_states(seq_len=5)
+        cache.update(keys, values, layer_idx=0)
+
+        cache._layers[0].evict_tokens(100)
+        assert cache._layers[0].get_seq_length() == 0
+        assert cache._layers[0]._kv_offset == 5
+
+    def test_evict_preserves_later_tokens(self):
+        """After eviction, remaining tokens should match the originals."""
+        cache = TurboQuantCache(bits=3, seed=SEED)
+        keys, values = make_kv_states(seq_len=10)
+        cache.update(keys, values, layer_idx=0)
+
+        # Get full cache before eviction
+        k_full, v_full = cache[0]
+
+        # Evict first 3 tokens
+        cache._layers[0].evict_tokens(3)
+        k_after, v_after = cache[0]
+
+        assert k_after.shape[2] == 7
+        torch.testing.assert_close(k_after, k_full[:, :, 3:, :], atol=1e-5, rtol=1e-5)
+        torch.testing.assert_close(v_after, v_full[:, :, 3:, :], atol=1e-5, rtol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# Test: lazy initialization / meta device support (Bug Fix #2)
+# ---------------------------------------------------------------------------
+class TestMetaDeviceSupport:
+    """Verify lazy initialization for meta device (device_map='auto')."""
+
+    def test_meta_tensor_defers_allocation(self):
+        """Meta tensors should record shapes but not allocate quantizers."""
+        layer = TurboQuantLayer(bits=3, seed=SEED)
+
+        # Simulate what HF does with device_map="auto": create meta tensors
+        meta_keys = torch.randn(1, 4, 1, HEAD_DIM, device="meta")
+        meta_values = torch.randn(1, 4, 1, HEAD_DIM, device="meta")
+
+        layer._lazy_init(meta_keys, meta_values)
+
+        # Shapes should be recorded
+        assert layer._head_dim == HEAD_DIM
+        assert layer._num_heads == 4
+        assert layer._batch_size == 1
+        # But quantizers should NOT be allocated (meta cannot allocate)
+        assert layer._key_est is None
+        assert layer._key_pq is None
+        assert layer._val_pq is None
+
+    def test_meta_then_real_allocates(self):
+        """After meta init, first real update should allocate quantizers."""
+        layer = TurboQuantLayer(bits=3, seed=SEED)
+
+        # Phase 1: meta tensor (shape inference)
+        meta_keys = torch.randn(1, 4, 1, HEAD_DIM, device="meta")
+        meta_values = torch.randn(1, 4, 1, HEAD_DIM, device="meta")
+        layer._lazy_init(meta_keys, meta_values)
+
+        # Phase 2: real tensor (actual computation)
+        real_keys = torch.randn(1, 4, 2, HEAD_DIM)
+        real_values = torch.randn(1, 4, 2, HEAD_DIM)
+        k_out, v_out = layer.update(real_keys, real_values)
+
+        # Quantizers should now be allocated
+        assert layer._val_pq is not None
+        assert layer._key_est is not None
+        assert k_out.shape == (1, 4, 2, HEAD_DIM)
+        assert v_out.shape == (1, 4, 2, HEAD_DIM)
+
+    def test_meta_then_real_mse_only(self):
+        """Meta -> real transition should work for mse_only mode too."""
+        layer = TurboQuantLayer(bits=3, seed=SEED, mse_only=True)
+
+        meta_keys = torch.randn(1, 4, 1, HEAD_DIM, device="meta")
+        meta_values = torch.randn(1, 4, 1, HEAD_DIM, device="meta")
+        layer._lazy_init(meta_keys, meta_values)
+
+        assert layer._key_pq is None
+        assert layer._val_pq is None
+
+        real_keys = torch.randn(1, 4, 2, HEAD_DIM)
+        real_values = torch.randn(1, 4, 2, HEAD_DIM)
+        k_out, v_out = layer.update(real_keys, real_values)
+
+        assert layer._key_pq is not None
+        assert layer._val_pq is not None
+        assert k_out.shape == (1, 4, 2, HEAD_DIM)
+
+    def test_cache_level_meta_to_real(self):
+        """TurboQuantCache should handle meta -> real transition seamlessly."""
+        cache = TurboQuantCache(bits=3, seed=SEED)
+
+        # Simulate HF's shape inference pass with meta tensors
+        meta_keys = torch.randn(1, 4, 1, HEAD_DIM, device="meta")
+        meta_values = torch.randn(1, 4, 1, HEAD_DIM, device="meta")
+
+        # Manually trigger lazy init via the layer
+        while len(cache._layers) <= 0:
+            cache._layers.append(cache._make_layer(len(cache._layers)))
+        cache._layers[0]._lazy_init(meta_keys, meta_values)
+
+        # Now do a real update
+        real_keys = torch.randn(1, 4, 4, HEAD_DIM)
+        real_values = torch.randn(1, 4, 4, HEAD_DIM)
+        k_out, v_out = cache.update(real_keys, real_values, layer_idx=0)
+
+        assert k_out.shape == (1, 4, 4, HEAD_DIM)
+        assert cache.get_seq_length(0) == 4
+
+
+# ---------------------------------------------------------------------------
+# Test: multi-device layer support (Bug Fix #4)
+# ---------------------------------------------------------------------------
+class TestMultiDeviceLayer:
+    """Verify that layers can handle tensors from different devices."""
+
+    def test_layer_tracks_device(self):
+        """Layer should track the device of input tensors."""
+        layer = TurboQuantLayer(bits=3, seed=SEED)
+        keys, values = make_kv_states(seq_len=2)
+        layer.update(keys, values)
+
+        assert layer._device == torch.device("cpu")
+
+    def test_cache_creates_layers_with_correct_device(self):
+        """Each layer should adopt the device of its input tensors."""
+        cache = TurboQuantCache(bits=3, seed=SEED)
+
+        # Layer 0 on CPU
+        keys0, values0 = make_kv_states(seq_len=2, seed=1)
+        cache.update(keys0, values0, layer_idx=0)
+        assert cache._layers[0]._device == torch.device("cpu")
+
+        # Layer 1 also on CPU (but independently created)
+        keys1, values1 = make_kv_states(seq_len=2, seed=2)
+        cache.update(keys1, values1, layer_idx=1)
+        assert cache._layers[1]._device == torch.device("cpu")
+
+
+# ---------------------------------------------------------------------------
+# Test: beam search with eviction (reorder consistency)
+# ---------------------------------------------------------------------------
+class TestBeamSearchWithEviction:
+    """Verify beam search reordering works correctly after eviction."""
+
+    def test_reorder_after_eviction(self):
+        """Reorder should work correctly on a cache that has had tokens evicted."""
+        cache = TurboQuantCache(bits=3, seed=SEED)
+
+        # Create distinct data per batch
+        torch.manual_seed(SEED)
+        keys = torch.randn(2, NUM_HEADS, 10, HEAD_DIM)
+        values = torch.randn(2, NUM_HEADS, 10, HEAD_DIM)
+        cache.update(keys, values, layer_idx=0)
+
+        # Evict first 3 tokens
+        cache._layers[0].evict_tokens(3)
+        assert cache._layers[0].get_seq_length() == 7
+
+        # Reorder: swap batch 0 and 1
+        beam_idx = torch.tensor([1, 0])
+        k_before, v_before = cache[0]
+        cache.reorder_cache(beam_idx)
+        k_after, v_after = cache[0]
+
+        # Batch dimension should be swapped
+        torch.testing.assert_close(k_after[0], k_before[1], atol=1e-5, rtol=1e-4)
+        torch.testing.assert_close(k_after[1], k_before[0], atol=1e-5, rtol=1e-4)
+
+        # Offset should be preserved
+        assert cache._layers[0]._kv_offset == 3
+
+    def test_reorder_mse_only_mode(self):
+        """Reorder should work in mse_only mode (no qjl_signs in entries)."""
+        cache = TurboQuantCache(bits=3, seed=SEED, mse_only=True)
+
+        torch.manual_seed(SEED)
+        keys = torch.randn(2, NUM_HEADS, 5, HEAD_DIM)
+        values = torch.randn(2, NUM_HEADS, 5, HEAD_DIM)
+        cache.update(keys, values, layer_idx=0)
+
+        # This should NOT crash (was crashing before fix)
+        beam_idx = torch.tensor([1, 0])
+        cache.reorder_cache(beam_idx)
+
+        k_out, v_out = cache[0]
+        assert k_out.shape == (2, NUM_HEADS, 5, HEAD_DIM)
+
+    def test_crop_mse_only_mode(self):
+        """Crop should work in mse_only mode (no qjl_signs in entries)."""
+        cache = TurboQuantCache(bits=3, seed=SEED, mse_only=True)
+
+        keys, values = make_kv_states(seq_len=10)
+        cache.update(keys, values, layer_idx=0)
+
+        # This should NOT crash (was crashing before fix)
+        cache.crop(5)
+        assert cache.get_seq_length(0) == 5
+
+        k_out, v_out = cache[0]
+        assert k_out.shape[2] == 5
+
+    def test_batch_repeat_interleave_mse_only(self):
+        """batch_repeat_interleave should work in mse_only mode."""
+        cache = TurboQuantCache(bits=3, seed=SEED, mse_only=True)
+        keys, values = make_kv_states(batch=2, seq_len=3)
+        cache.update(keys, values, layer_idx=0)
+
+        # This should NOT crash
+        cache.batch_repeat_interleave(3)
+        k_out, v_out = cache[0]
+        assert k_out.shape[0] == 6
+
+    def test_batch_select_indices_mse_only(self):
+        """batch_select_indices should work in mse_only mode."""
+        cache = TurboQuantCache(bits=3, seed=SEED, mse_only=True)
+        keys, values = make_kv_states(batch=4, seq_len=3)
+        cache.update(keys, values, layer_idx=0)
+
+        # This should NOT crash
+        indices = torch.tensor([0, 2])
+        cache.batch_select_indices(indices)
+        k_out, v_out = cache[0]
+        assert k_out.shape[0] == 2
+
+
+# ---------------------------------------------------------------------------
+# Test: _clean_param_dict utility (Bug Fix #3)
+# ---------------------------------------------------------------------------
+class TestCleanParamDict:
+    """Verify that _clean_param_dict strips HF-injected attributes."""
+
+    def test_strips_hf_initialized(self):
+        """Should remove _is_hf_initialized from param dict."""
+        from turboquantdc.hf_integration import _clean_param_dict
+
+        param = torch.nn.Parameter(torch.randn(4, 4))
+        param._is_hf_initialized = True
+        param.some_normal_attr = 42
+
+        cleaned = _clean_param_dict(param)
+        assert "_is_hf_initialized" not in cleaned
+        assert "some_normal_attr" in cleaned
+        assert cleaned["some_normal_attr"] == 42
+
+    def test_strips_hf_hook(self):
+        """Should remove _hf_hook from param dict."""
+        from turboquantdc.hf_integration import _clean_param_dict
+
+        param = torch.nn.Parameter(torch.randn(4, 4))
+        param._hf_hook = "some_hook_object"
+
+        cleaned = _clean_param_dict(param)
+        assert "_hf_hook" not in cleaned
+
+    def test_strips_old_forward(self):
+        """Should remove _old_forward from param dict."""
+        from turboquantdc.hf_integration import _clean_param_dict
+
+        param = torch.nn.Parameter(torch.randn(4, 4))
+        param._old_forward = lambda: None
+
+        cleaned = _clean_param_dict(param)
+        assert "_old_forward" not in cleaned
+
+    def test_preserves_normal_attrs(self):
+        """Should keep non-HF attributes untouched."""
+        from turboquantdc.hf_integration import _clean_param_dict
+
+        param = torch.nn.Parameter(torch.randn(4, 4))
+        param.custom_attr = "keep_me"
+        param.another = 123
+
+        cleaned = _clean_param_dict(param)
+        assert cleaned["custom_attr"] == "keep_me"
+        assert cleaned["another"] == 123
+
+    def test_empty_param_returns_empty(self):
+        """Param with no extra attrs should return an empty-ish dict."""
+        from turboquantdc.hf_integration import _clean_param_dict
+
+        param = torch.nn.Parameter(torch.randn(2, 2))
+        cleaned = _clean_param_dict(param)
+        # Should not crash and should return a dict
+        assert isinstance(cleaned, dict)
+
+    def test_does_not_mutate_original(self):
+        """Should not modify the original param.__dict__."""
+        from turboquantdc.hf_integration import _clean_param_dict
+
+        param = torch.nn.Parameter(torch.randn(2, 2))
+        param._is_hf_initialized = True
+        original_dict = dict(param.__dict__)
+
+        _clean_param_dict(param)
+
+        # Original should be unchanged
+        assert "_is_hf_initialized" in param.__dict__
+        assert param.__dict__ == original_dict
+
+
+# ---------------------------------------------------------------------------
+# Test: adaptive_hf_cache get_mask_sizes offset
+# ---------------------------------------------------------------------------
+class TestAdaptiveHFCacheMaskOffset:
+    """Verify AdaptiveHFCache delegates offset tracking correctly."""
+
+    def test_offset_from_turboquant_layer(self):
+        """AdaptiveHFCache should use _kv_offset from TurboQuantLayer."""
+        from turboquantdc.adaptive_hf_cache import AdaptiveHFCache
+
+        cache = AdaptiveHFCache(
+            num_layers=4,
+            compressed_bits=3,
+            anchor_interval=2,  # layers 0, 2 are FP16
+            anchor_mode="interval",
+        )
+
+        # Layer 1 is compressed (TurboQuantLayer)
+        keys, values = make_kv_states(seq_len=20)
+        cache.update(keys, values, layer_idx=1)
+
+        # Evict 5 tokens
+        cache._layers[1].evict_tokens(5)
+        assert cache._layers[1]._kv_offset == 5
+
+        cache_position = torch.arange(1)
+        kv_length, kv_offset = cache.get_mask_sizes(cache_position, layer_idx=1)
+        assert kv_offset == 5
+        assert kv_length == 15 + 1 + 5
+
+    def test_fp16_layer_has_no_offset(self):
+        """FP16 layers have no eviction, so offset should always be 0."""
+        from turboquantdc.adaptive_hf_cache import AdaptiveHFCache
+
+        cache = AdaptiveHFCache(
+            num_layers=4,
+            compressed_bits=3,
+            anchor_interval=2,
+            anchor_mode="interval",
+        )
+
+        # Layer 0 is FP16
+        keys, values = make_kv_states(seq_len=10)
+        cache.update(keys, values, layer_idx=0)
+
+        cache_position = torch.arange(1)
+        kv_length, kv_offset = cache.get_mask_sizes(cache_position, layer_idx=0)
+        assert kv_offset == 0
+        assert kv_length == 10 + 1

@@ -263,11 +263,20 @@ class AdaptiveHFCache:
     def get_mask_sizes(
         self, cache_position: torch.Tensor, layer_idx: int
     ) -> tuple[int, int]:
+        """Return ``(kv_length, kv_offset)`` for mask generation.
+
+        Delegates offset tracking to the underlying layer.  For
+        ``TurboQuantLayer`` instances, this accounts for evicted tokens
+        via ``_kv_offset``.  ``FP16Layer`` has no eviction so its offset
+        is always 0.
+        """
         if layer_idx >= len(self._layers):
             return cache_position.shape[0], 0
+        layer = self._layers[layer_idx]
         query_length = cache_position.shape[0]
-        kv_length = self._layers[layer_idx].get_seq_length() + query_length
-        return kv_length, 0
+        kv_offset = getattr(layer, "_kv_offset", 0)
+        kv_length = layer.get_seq_length() + query_length + kv_offset
+        return kv_length, kv_offset
 
     def reorder_cache(self, beam_idx: torch.LongTensor) -> None:
         for layer in self._layers:
