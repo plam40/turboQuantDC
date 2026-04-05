@@ -21,6 +21,10 @@ _triton = [
     "triton>=3.0.0",
 ]
 
+_faiss = [
+    "faiss-gpu",
+]
+
 _benchmark = [
     "datasets",
     "matplotlib",
@@ -34,7 +38,7 @@ _dev = [
 
 setup(
     name="turboquantdc",
-    version="0.2.0",
+    version="0.3.0",
     author="TurboQuantDC Contributors",
     description="TurboQuant: 3-bit KV cache compression for LLMs with <0.5% attention quality loss",
     long_description=long_description,
@@ -58,8 +62,9 @@ setup(
         "hf": _hf,
         "bnb": _bnb,
         "triton": _triton,
+        "faiss": _faiss,
         "benchmark": _benchmark,
-        "all": _base + _hf + _bnb + _triton + _benchmark,
+        "all": _base + _hf + _bnb + _triton + _faiss + _benchmark,
         "dev": _dev,
     },
     keywords=[

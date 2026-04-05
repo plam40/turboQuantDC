@@ -13,7 +13,7 @@ Modules:
     vllm_integration -- vLLM attention backend and cache manager
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 import sys
 
@@ -118,6 +118,27 @@ from .cross_layer_kv import (
     correlation_report,
 )
 from .adaptive_generation_cache import AdaptiveGenerationCache
+
+# ---------------------------------------------------------------------------
+# v0.3.0: New research modules
+# ---------------------------------------------------------------------------
+from .residual_quant import ResidualQuantEstimator, ResidualQuantCache, ResidualQuantLayer
+from .adaptive_bits import AdaptiveBitsCache, ImportanceScorer
+from .delta_quant import DeltaQuantEncoder
+from .learned_rotation import PCARotatedQuantizer, compute_pca_rotation
+from .v2_cache import TurboQuantV2Cache
+from .ultra_compress import AttentionGatedCache
+from .attention_optimal import MeanRemovedQuantizer
+
+try:
+    from .retrieval_cache import RetrievalKVCache
+except ImportError:
+    pass  # faiss-gpu not installed
+
+try:
+    from .pca_code_retrieval import PCACodeIndex
+except ImportError:
+    pass
 
 # ---------------------------------------------------------------------------
 # HuggingFace integration (transformers imported lazily inside the module,
@@ -328,6 +349,27 @@ __all__ = [
     "correlation_report",
     # Adaptive Generation Cache (unified system)
     "AdaptiveGenerationCache",
+    # v0.3.0: ResidualQuant (improved Stage 2)
+    "ResidualQuantEstimator",
+    "ResidualQuantCache",
+    "ResidualQuantLayer",
+    # v0.3.0: Adaptive Bit Allocation
+    "AdaptiveBitsCache",
+    "ImportanceScorer",
+    # v0.3.0: DeltaQuant (cross-token delta coding)
+    "DeltaQuantEncoder",
+    # v0.3.0: PCA-Adaptive Rotation
+    "PCARotatedQuantizer",
+    "compute_pca_rotation",
+    # v0.3.0: TurboQuantV2Cache (unified pipeline)
+    "TurboQuantV2Cache",
+    # v0.3.0: Attention-Gated 1-bit Cache
+    "AttentionGatedCache",
+    # v0.3.0: Mean-Removed Quantization
+    "MeanRemovedQuantizer",
+    # v0.3.0: Retrieval Cache (requires faiss-gpu)
+    "RetrievalKVCache",
+    "PCACodeIndex",
     # Triton Kernels (optional)
     "TritonTurboQuant",
     "triton_wht_rotate",
