@@ -34,15 +34,13 @@ features from the same input representation.
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict
 
 import torch
 import torch.nn as nn
 
-from .codebook import LloydMaxCodebook
 from .polarquant import PolarQuant
 from .residual_quant import ResidualQuantEstimator
-
 
 # ---------------------------------------------------------------------------
 # Inter-head correlation measurement

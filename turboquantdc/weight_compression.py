@@ -23,7 +23,6 @@ Reference: TurboQuant paper (arxiv 2504.19874), applied to weights
 
 from __future__ import annotations
 
-import math
 from typing import Dict, List, Optional, Tuple, Union
 
 import torch
@@ -32,7 +31,6 @@ import torch.nn.functional as F
 
 from .codebook import LloydMaxCodebook
 from .rotation import generate_rotation_matrix
-
 
 # ---------------------------------------------------------------------------
 # Bit allocation strategies

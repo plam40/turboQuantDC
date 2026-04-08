@@ -24,14 +24,12 @@ For G=4 groups per 16 tokens, delta=1bit: (4*3 + 12*1)/16 + 0.25 = 1.75 bits
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Tuple
 
 import torch
-import torch.nn.functional as F
 
 from .codebook import LloydMaxCodebook
 from .rotation import apply_wht_rotation, generate_wht_rotation
-
 
 # ---------------------------------------------------------------------------
 # Clustering utilities

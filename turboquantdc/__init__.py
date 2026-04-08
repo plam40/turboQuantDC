@@ -39,51 +39,69 @@ def _optional_import_error(module_name: str, extra: str, pkg: str) -> None:
 # ---------------------------------------------------------------------------
 # Core modules (always available -- depend only on torch + scipy)
 # ---------------------------------------------------------------------------
-from .codebook import LloydMaxCodebook, beta_pdf, gaussian_pdf, solve_lloyd_max
-from .estimator import TurboQuantEstimator
-from .kv_cache import TurboQuantKVCache
-from .polarquant import PolarQuant
-from .qjl import QJL
-from .rotation import generate_qjl_matrix, generate_rotation_matrix
-
-# Phase 5: Beyond the Paper -- core extensions (torch-only)
-from .rotation import apply_wht_rotation, fast_wht, generate_wht_rotation
-from .sparse_v import SparseVAttention, sparse_attention
-from .outlier import OutlierTurboQuant
-from .layer_adaptive import FP16Cache, LayerAdaptiveKVCache, estimate_memory, recommended_schedule
-from .temporal_decay import TemporalDecayCache
-from .custom_attention import turboquant_attention, patch_model_attention
-from .fused_attention import (
-    fused_turboquant_attention,
-    fused_mse_attention,
-    compute_norm_correction,
-    patch_model_fused_attention,
+from .asymmetric import (
+    PRESETS as ASYMMETRIC_PRESETS,
 )
-from .streaming import StreamingInferenceEngine
-from .chunked_prefill import ChunkedPrefillEngine
 from .asymmetric import (
     AsymmetricKVCache,
     AsymmetricTurboQuantCache,
     AsymmetricTurboQuantLayer,
-    PRESETS as ASYMMETRIC_PRESETS,
-    create_asymmetric_cache,
     analyze_kv_norms,
+    create_asymmetric_cache,
+)
+from .chunked_prefill import ChunkedPrefillEngine
+from .codebook import LloydMaxCodebook, beta_pdf, gaussian_pdf, solve_lloyd_max
+from .custom_attention import patch_model_attention, turboquant_attention
+from .estimator import TurboQuantEstimator
+from .fused_attention import (
+    compute_norm_correction,
+    fused_mse_attention,
+    fused_turboquant_attention,
+    patch_model_fused_attention,
 )
 from .generation_cache import (
+    ANCHOR_STRATEGIES,
     GenerationCache,
     HybridCache,
+    _compute_attention_entropy,
     compute_anchor_schedule,
     compute_layer_key_bits,
-    ANCHOR_STRATEGIES,
-    _compute_attention_entropy,
 )
+from .kv_cache import TurboQuantKVCache
+from .layer_adaptive import FP16Cache, LayerAdaptiveKVCache, estimate_memory, recommended_schedule
+from .outlier import OutlierTurboQuant
+from .polarquant import PolarQuant
+from .qjl import QJL
+
+# Phase 5: Beyond the Paper -- core extensions (torch-only)
+from .rotation import (
+    apply_wht_rotation,
+    fast_wht,
+    generate_qjl_matrix,
+    generate_rotation_matrix,
+    generate_wht_rotation,
+)
+from .sparse_v import SparseVAttention, sparse_attention
+from .streaming import StreamingInferenceEngine
+from .temporal_decay import TemporalDecayCache
+
 GENERATION_PRESETS = GenerationCache.PRESETS
+from .adaptive_bits import AdaptiveBitsCache, ImportanceScorer
+from .adaptive_generation_cache import AdaptiveGenerationCache
+from .attention_optimal import MeanRemovedQuantizer
 from .channel_adaptive import (
     ChannelAdaptiveCache,
     ChannelAdaptivePolarQuant,
     analyze_channel_sensitivity,
     get_channel_priority,
 )
+from .cross_layer_kv import (
+    CrossLayerKVCache,
+    correlation_report,
+    measure_cross_layer_kv_correlation,
+    measure_distribution_similarity,
+)
+from .delta_quant import DeltaQuantEncoder
 from .entropy_coding import (
     ANSEncoder,
     CompressedPolarQuant,
@@ -94,15 +112,23 @@ from .entropy_coding import (
     measure_index_entropy,
     theoretical_index_entropy,
 )
-from .token_eviction import EvictionCache
+from .learned_rotation import PCARotatedQuantizer, compute_pca_rotation
+
+# ---------------------------------------------------------------------------
+# v0.3.0: New research modules
+# ---------------------------------------------------------------------------
+from .residual_quant import ResidualQuantCache, ResidualQuantEstimator, ResidualQuantLayer
+from .residual_vq import ResidualVQ, ResidualVQCache, ResidualVQLayer
 from .self_correcting_cache import SelfCorrectingCache
+from .token_eviction import EvictionCache
+from .ultra_compress import AttentionGatedCache
 from .ultra_value_quant import (
-    UltraValueQuantizer,
     UltraValueCache,
+    UltraValueQuantizer,
     compute_value_layer_schedule,
     sweep_value_bits,
 )
-from .residual_vq import ResidualVQ, ResidualVQCache, ResidualVQLayer
+from .v2_cache import TurboQuantV2Cache
 from .weight_compression import (
     CompressedLinear,
     TurboQuantWeightCompressor,
@@ -111,24 +137,6 @@ from .weight_compression import (
     effective_bpw,
     estimate_compressed_size,
 )
-from .cross_layer_kv import (
-    CrossLayerKVCache,
-    measure_cross_layer_kv_correlation,
-    measure_distribution_similarity,
-    correlation_report,
-)
-from .adaptive_generation_cache import AdaptiveGenerationCache
-
-# ---------------------------------------------------------------------------
-# v0.3.0: New research modules
-# ---------------------------------------------------------------------------
-from .residual_quant import ResidualQuantEstimator, ResidualQuantCache, ResidualQuantLayer
-from .adaptive_bits import AdaptiveBitsCache, ImportanceScorer
-from .delta_quant import DeltaQuantEncoder
-from .learned_rotation import PCARotatedQuantizer, compute_pca_rotation
-from .v2_cache import TurboQuantV2Cache
-from .ultra_compress import AttentionGatedCache
-from .attention_optimal import MeanRemovedQuantizer
 
 try:
     from .retrieval_cache import RetrievalKVCache
@@ -148,15 +156,6 @@ except ImportError:
 from .hf_integration import TurboQuantCache
 
 # ---------------------------------------------------------------------------
-# vLLM integration (vLLM imported lazily inside the module)
-# ---------------------------------------------------------------------------
-from .vllm_integration import (
-    TurboQuantAttentionBackend,
-    TurboQuantCacheManager,
-    get_turboquant_config,
-)
-
-# ---------------------------------------------------------------------------
 # Streaming 70B / Ultra-Streaming (transformers imported lazily inside)
 # ---------------------------------------------------------------------------
 from .streaming_70b import (
@@ -173,6 +172,15 @@ from .ultra_streaming import (
     WeightManager,
     format_plan_report,
     plan_memory,
+)
+
+# ---------------------------------------------------------------------------
+# vLLM integration (vLLM imported lazily inside the module)
+# ---------------------------------------------------------------------------
+from .vllm_integration import (
+    TurboQuantAttentionBackend,
+    TurboQuantCacheManager,
+    get_turboquant_config,
 )
 
 # ---------------------------------------------------------------------------

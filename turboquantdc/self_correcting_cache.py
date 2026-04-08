@@ -44,7 +44,7 @@ from typing import Any, Dict, List, Optional
 
 import torch
 
-from .generation_cache import GenerationCache, _CompressedLayer, _FP16Layer
+from .generation_cache import _CompressedLayer, _FP16Layer
 
 
 class SelfCorrectingCache:
@@ -275,6 +275,7 @@ class SelfCorrectingCache:
         d = layer._head_dim
         k_codebook = layer._key_codebook
         v_codebook = layer._val_codebook
+        assert d is not None and k_codebook is not None and v_codebook is not None
 
         for pos in valid_positions:
             # Key norm refresh

@@ -45,13 +45,11 @@ Usage::
 
 from __future__ import annotations
 
-import math
 from typing import Any, Dict, List, Optional
 
 import torch
 
-from .generation_cache import _CompressedLayer, _FP16Layer, GenerationCache
-
+from .generation_cache import _CompressedLayer, _FP16Layer
 
 # ---------------------------------------------------------------------------
 # Evictable compressed layer

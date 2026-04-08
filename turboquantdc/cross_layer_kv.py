@@ -39,25 +39,21 @@ correlation and confirmed the negative result for delta coding.
 
 from __future__ import annotations
 
-import math
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
 from .codebook import LloydMaxCodebook
 from .generation_cache import (
-    GenerationCache,
-    _CompressedLayer,
+    ANCHOR_STRATEGIES,
     _FP16Layer,
     compute_anchor_schedule,
-    ANCHOR_STRATEGIES,
 )
 from .rotation import (
     apply_wht_rotation,
     generate_rotation_matrix,
     generate_wht_rotation,
 )
-
 
 # ---------------------------------------------------------------------------
 # Cross-layer KV correlation diagnostics
@@ -96,7 +92,7 @@ def measure_cross_layer_kv_correlation(
         k_curr, v_curr = kv_by_layer[l_curr]
         k_next, v_next = kv_by_layer[l_next]
 
-        stats = {"layer_pair": (l_curr, l_next)}
+        stats: Dict[str, Any] = {"layer_pair": (l_curr, l_next)}
 
         for prefix, t_curr, t_next in [
             ("key", k_curr, k_next),
@@ -171,7 +167,7 @@ def measure_distribution_similarity(
         k_curr, v_curr = kv_by_layer[l_curr]
         k_next, v_next = kv_by_layer[l_next]
 
-        stats = {"layer_pair": (l_curr, l_next)}
+        stats: Dict[str, Any] = {"layer_pair": (l_curr, l_next)}
 
         for prefix, t_curr, t_next in [
             ("key", k_curr, k_next),

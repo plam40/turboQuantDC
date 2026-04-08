@@ -33,11 +33,9 @@ Reference: benchmarks/results/temporal_delta_results.md for full experiment data
 
 from __future__ import annotations
 
-import math
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Tuple
 
 import torch
-
 
 # ---------------------------------------------------------------------------
 # Uniform quantization utilities for deltas

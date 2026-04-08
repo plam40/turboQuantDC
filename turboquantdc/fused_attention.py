@@ -23,10 +23,9 @@ Community: hackimov/turboquant-kv, DEJAN blog, llama.cpp #20969.
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import torch
-import torch.nn.functional as F
 
 
 def fused_turboquant_attention(
@@ -467,11 +466,11 @@ def patch_model_fused_attention(
         The same model object, with attention layers patched in-place.
     """
     from .custom_attention import (
+        _apply_rotary_pos_emb,
+        _get_attention_module,
         _get_inner_model,
         _get_layers,
-        _get_attention_module,
         _run_qkv_projections,
-        _apply_rotary_pos_emb,
     )
 
     inner_model = _get_inner_model(model)

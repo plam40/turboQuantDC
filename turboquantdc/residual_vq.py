@@ -32,15 +32,13 @@ for norm (same overhead structure as PolarQuant).
 
 from __future__ import annotations
 
-import math
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import torch
 import torch.nn as nn
 
-from .codebook import LloydMaxCodebook, gaussian_pdf, solve_lloyd_max
+from .codebook import LloydMaxCodebook
 from .polarquant import PolarQuant
-from .rotation import generate_rotation_matrix
 
 
 class ResidualVQ(nn.Module):

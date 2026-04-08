@@ -28,7 +28,6 @@ import torch
 from .polarquant import PolarQuant
 from .residual_quant import ResidualQuantEstimator
 
-
 # ---------------------------------------------------------------------------
 # Per-layer implementations
 # ---------------------------------------------------------------------------

@@ -351,7 +351,7 @@ class CUDATurboQuant:
         device: str | torch.device = "cuda",
     ):
         from .codebook import LloydMaxCodebook
-        from .rotation import generate_rotation_matrix, generate_qjl_matrix
+        from .rotation import generate_qjl_matrix, generate_rotation_matrix
 
         self.d = d
         self.bits = bits

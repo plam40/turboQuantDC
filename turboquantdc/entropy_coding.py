@@ -32,13 +32,12 @@ import math
 import struct
 from typing import Dict, List, Optional, Tuple
 
-import torch
 import numpy as np
+import torch
 from scipy import integrate
 
 from .codebook import LloydMaxCodebook, gaussian_pdf
 from .polarquant import PolarQuant
-
 
 # ---------------------------------------------------------------------------
 # Analysis functions

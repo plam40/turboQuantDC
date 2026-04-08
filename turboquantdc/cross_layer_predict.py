@@ -18,9 +18,8 @@ from __future__ import annotations
 import gc
 import math
 import os
-import sys
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -172,10 +171,10 @@ def analyze_delta_coding(
     avg_k_l2 = sum(results["key_l2_ratios"]) / len(results["key_l2_ratios"])
     avg_v_l2 = sum(results["value_l2_ratios"]) / len(results["value_l2_ratios"])
 
-    print(f"\n  Delta variance / absolute variance:")
+    print("\n  Delta variance / absolute variance:")
     print(f"    Keys:   {avg_k_var:.4f}  (need < 0.5 for delta coding)")
     print(f"    Values: {avg_v_var:.4f}")
-    print(f"  Delta L2 / absolute L2:")
+    print("  Delta L2 / absolute L2:")
     print(f"    Keys:   {avg_k_l2:.4f}")
     print(f"    Values: {avg_v_l2:.4f}")
 
@@ -183,7 +182,7 @@ def analyze_delta_coding(
     n = len(results["key_variance_ratios"])
     sample_idxs = list(range(min(3, n))) + list(range(n // 2 - 1, n // 2 + 2)) + list(range(max(0, n - 3), n))
     sample_idxs = sorted(set(i for i in sample_idxs if 0 <= i < n))
-    print(f"\n  Per-layer sample (layer pair -> var ratio K / V):")
+    print("\n  Per-layer sample (layer pair -> var ratio K / V):")
     for idx in sample_idxs:
         kr = results["key_variance_ratios"][idx]
         vr = results["value_variance_ratios"][idx]
@@ -310,10 +309,10 @@ def analyze_linear_predictor(
     # Compute random baseline (what R^2 would we get with RANDOM data?)
     random_r2_global = _compute_random_baseline_r2(N_global, d)
     random_r2_per_head = _compute_random_baseline_r2(N_per_head, d)
-    print(f"\n  RANDOM BASELINE R^2 (purely uncorrelated data):")
+    print("\n  RANDOM BASELINE R^2 (purely uncorrelated data):")
     print(f"    Global (N={N_global}):   {random_r2_global:.4f}")
     print(f"    Per-head (N={N_per_head}): {random_r2_per_head:.4f}")
-    print(f"    (Any R^2 below these values is SPURIOUS overfitting)")
+    print("    (Any R^2 below these values is SPURIOUS overfitting)")
 
     results = {
         "key_r2": [], "value_r2": [],
@@ -368,7 +367,7 @@ def analyze_linear_predictor(
     avg_k_cv = sum(r for r in results["key_r2_cv"] if not math.isnan(r)) / max(1, sum(1 for r in results["key_r2_cv"] if not math.isnan(r)))
     avg_v_cv = sum(r for r in results["value_r2_cv"] if not math.isnan(r)) / max(1, sum(1 for r in results["value_r2_cv"] if not math.isnan(r)))
 
-    print(f"\n  R^2 comparison (raw vs adjusted vs cross-validated):")
+    print("\n  R^2 comparison (raw vs adjusted vs cross-validated):")
     print(f"  {'':>25} {'Keys':>10} {'Values':>10}")
     print(f"  {'Raw R^2':>25} {avg_k_r2:>10.4f} {avg_v_r2:>10.4f}")
     print(f"  {'Adjusted R^2':>25} {avg_k_adj:>10.4f} {avg_v_adj:>10.4f}")
@@ -379,7 +378,7 @@ def analyze_linear_predictor(
     real_signal_k = avg_k_cv > random_r2_global + 0.05
     real_signal_v = avg_v_cv > random_r2_global + 0.05
 
-    print(f"\n  Signal above random baseline?")
+    print("\n  Signal above random baseline?")
     print(f"    Keys:   CV R^2={avg_k_cv:.4f} vs random={random_r2_global:.4f} "
           f"-> {'YES (+{:.4f})'.format(avg_k_cv - random_r2_global) if real_signal_k else 'NO (spurious)'}")
     print(f"    Values: CV R^2={avg_v_cv:.4f} vs random={random_r2_global:.4f} "
@@ -389,7 +388,7 @@ def analyze_linear_predictor(
     n = len(results["key_r2"])
     sample_idxs = list(range(min(3, n))) + list(range(n // 2 - 1, n // 2 + 2)) + list(range(max(0, n - 3), n))
     sample_idxs = sorted(set(i for i in sample_idxs if 0 <= i < n))
-    print(f"\n  Per-layer sample (Raw R^2 / CV R^2 for keys):")
+    print("\n  Per-layer sample (Raw R^2 / CV R^2 for keys):")
     for idx in sample_idxs:
         kr = results["key_r2"][idx]
         kr_cv = results["key_r2_cv"][idx]
@@ -411,7 +410,7 @@ def analyze_linear_predictor(
     viable = real_signal_k or real_signal_v
     print(f"\n  VERDICT: {'REAL SIGNAL' if viable else 'SPURIOUS / NOT VIABLE'}")
     if not viable:
-        print(f"    The raw R^2 is misleadingly high due to high-dimensional overfitting.")
+        print("    The raw R^2 is misleadingly high due to high-dimensional overfitting.")
         print(f"    With {N_global} samples and {p} parameters, even random data gives "
               f"R^2={random_r2_global:.4f}.")
         print(f"    Cross-validated R^2 ({avg_k_cv:.4f}/{avg_v_cv:.4f}) reveals the "
@@ -571,7 +570,7 @@ def analyze_token_position_correlation(
         "pos_val_cos_min": pos_val_cos.min().item(),
     }
 
-    print(f"\n  Per-position cosine similarity (averaged across heads + layer pairs):")
+    print("\n  Per-position cosine similarity (averaged across heads + layer pairs):")
     print(f"    Keys:   mean={pos_key_cos.mean():.4f}, std={pos_key_cos.std():.4f}, "
           f"max={pos_key_cos.max():.4f}, min={pos_key_cos.min():.4f}")
     print(f"    Values: mean={pos_val_cos.mean():.4f}, std={pos_val_cos.std():.4f}, "
@@ -586,11 +585,11 @@ def analyze_token_position_correlation(
               f"Values={v_above}/{seq_len} ({100 * v_above / seq_len:.1f}%)")
 
     # Show first and last 5 positions
-    print(f"\n  First 10 positions:")
+    print("\n  First 10 positions:")
     for p in range(min(10, seq_len)):
         print(f"    Pos {p:>3}: Key={pos_key_cos[p]:.4f}, Val={pos_val_cos[p]:.4f}")
     if seq_len > 20:
-        print(f"  Last 5 positions:")
+        print("  Last 5 positions:")
         for p in range(seq_len - 5, seq_len):
             print(f"    Pos {p:>3}: Key={pos_key_cos[p]:.4f}, Val={pos_val_cos[p]:.4f}")
 
@@ -670,7 +669,7 @@ def analyze_subspace_alignment(
     n = len(results["key_subspace_overlap"])
     sample_idxs = list(range(min(3, n))) + list(range(n // 2 - 1, n // 2 + 2)) + list(range(max(0, n - 3), n))
     sample_idxs = sorted(set(i for i in sample_idxs if 0 <= i < n))
-    print(f"\n  Per-layer sample (layer pair -> subspace overlap K / V):")
+    print("\n  Per-layer sample (layer pair -> subspace overlap K / V):")
     for idx in sample_idxs:
         ko = results["key_subspace_overlap"][idx]
         vo = results["value_subspace_overlap"][idx]
@@ -813,10 +812,10 @@ def analyze_norm_direction_decomposition(
     avg_k_dir = sum(results["key_direction_cos"]) / len(results["key_direction_cos"])
     avg_v_dir = sum(results["value_direction_cos"]) / len(results["value_direction_cos"])
 
-    print(f"\n  Norm Pearson correlation (across layers):")
+    print("\n  Norm Pearson correlation (across layers):")
     print(f"    Keys:   {avg_k_norm_r:.4f}")
     print(f"    Values: {avg_v_norm_r:.4f}")
-    print(f"  Direction cosine similarity (across layers):")
+    print("  Direction cosine similarity (across layers):")
     print(f"    Keys:   {avg_k_dir:.4f}")
     print(f"    Values: {avg_v_dir:.4f}")
 
@@ -878,7 +877,7 @@ def generate_report(
     lines.append("")
     lines.append(f"- Key variance ratio (delta/abs): **{delta.get('avg_key_var_ratio', 'N/A'):.4f}**")
     lines.append(f"- Value variance ratio (delta/abs): **{delta.get('avg_value_var_ratio', 'N/A'):.4f}**")
-    lines.append(f"- Need < 0.5 for viable delta coding")
+    lines.append("- Need < 0.5 for viable delta coding")
     lines.append(f"- Verdict: **{'VIABLE' if delta.get('viable', False) else 'NOT VIABLE'}**")
     lines.append("")
 
@@ -978,10 +977,10 @@ def generate_report(
         lines.append("The linear predictor reveals an asymmetry between keys and values:")
         lines.append("")
         lines.append(f"- **Keys:** CV R^2={cv_k:.4f} vs random baseline {rand_r2:.4f} -- ")
-        lines.append(f"  genuine signal exists. A learned 128x128 rotation matrix can predict")
+        lines.append("  genuine signal exists. A learned 128x128 rotation matrix can predict")
         lines.append(f"  ~{cv_k * 100:.0f}% of key variance from the previous layer.")
         lines.append(f"- **Values:** CV R^2={cv_v:.4f} vs random baseline {rand_r2:.4f} -- ")
-        lines.append(f"  NO real signal. Value prediction is pure overfitting.")
+        lines.append("  NO real signal. Value prediction is pure overfitting.")
         lines.append("")
         lines.append("### The Paradox: Zero Cosine But High R^2")
         lines.append("")
@@ -1000,16 +999,16 @@ def generate_report(
         lines.append("")
         lines.append("Probably not, for several reasons:")
         lines.append("")
-        lines.append(f"1. **Predictor cost:** Each layer pair needs a 128x128 = 64 KB matrix.")
-        lines.append(f"   For 35 pairs, that is 2.2 MB of predictor storage -- comparable to")
-        lines.append(f"   the KV cache savings themselves.")
+        lines.append("1. **Predictor cost:** Each layer pair needs a 128x128 = 64 KB matrix.")
+        lines.append("   For 35 pairs, that is 2.2 MB of predictor storage -- comparable to")
+        lines.append("   the KV cache savings themselves.")
         lines.append(f"2. **Residual still large:** Even with {cv_k * 100:.0f}% variance explained,")
         lines.append(f"   the {(1 - cv_k) * 100:.0f}% residual must still be quantized. The residual")
-        lines.append(f"   variance reduction translates to maybe 0.5-1 fewer bit at best.")
-        lines.append(f"3. **Compute overhead:** Matrix multiply per layer per token during")
-        lines.append(f"   decoding adds latency on the critical path.")
-        lines.append(f"4. **Values are unpredictable:** Values have no cross-layer signal,")
-        lines.append(f"   and values represent most of the KV cache memory.")
+        lines.append("   variance reduction translates to maybe 0.5-1 fewer bit at best.")
+        lines.append("3. **Compute overhead:** Matrix multiply per layer per token during")
+        lines.append("   decoding adds latency on the critical path.")
+        lines.append("4. **Values are unpredictable:** Values have no cross-layer signal,")
+        lines.append("   and values represent most of the KV cache memory.")
         lines.append("")
 
         if delta.get("viable", False):
@@ -1053,7 +1052,7 @@ def generate_report(
         cv_k = linear.get("avg_key_r2_cv", 0)
         rand_k = linear.get("random_r2_global", 0)
         lines.append(f"The raw R^2 of {raw_k:.4f} looks promising, but this is a classic")
-        lines.append(f"high-dimensional overfitting trap. With N samples and d+1 parameters,")
+        lines.append("high-dimensional overfitting trap. With N samples and d+1 parameters,")
         lines.append(f"even purely random data yields R^2={rand_k:.4f}. The cross-validated")
         lines.append(f"R^2 of {cv_k:.4f} reveals the true (near-zero) predictive power.")
         lines.append("")

@@ -7,12 +7,10 @@ the HuggingFace Cache protocol.
 Current approach: MSE-only PolarQuant with norm correction.
 """
 
-import math
-import torch
-import torch.nn.functional as F
-from typing import Any, Dict, List, Optional, Tuple
 
-from .codebook import LloydMaxCodebook, gaussian_pdf
+import torch
+
+from .codebook import LloydMaxCodebook
 from .rotation import generate_rotation_matrix
 
 

@@ -33,15 +33,10 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple
 
 import torch
-import torch.nn.functional as F
-
-from .learned_rotation import PCARotatedQuantizer, compute_pca_rotation
-from .codebook import LloydMaxCodebook
-
 
 # ---------------------------------------------------------------------------
 # Binary PCA hash function

@@ -23,7 +23,6 @@ Lloyd-Max + rotation framework.
 
 from __future__ import annotations
 
-import math
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
@@ -31,7 +30,6 @@ import torch.nn as nn
 
 from .codebook import LloydMaxCodebook
 from .rotation import generate_rotation_matrix
-
 
 # ---------------------------------------------------------------------------
 # Channel sensitivity analysis

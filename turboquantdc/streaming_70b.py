@@ -63,9 +63,7 @@ import torch.nn.functional as F
 from .generation_cache import (
     ANCHOR_STRATEGIES,
     GenerationCache,
-    compute_anchor_schedule,
 )
-
 
 # ---------------------------------------------------------------------------
 # Layer GPU Cache: LRU with priority protection

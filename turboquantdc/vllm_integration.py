@@ -108,7 +108,6 @@ import torch.nn.functional as F
 from .estimator import TurboQuantEstimator
 from .polarquant import PolarQuant
 
-
 # ---------------------------------------------------------------------------
 # Type aliases
 # ---------------------------------------------------------------------------

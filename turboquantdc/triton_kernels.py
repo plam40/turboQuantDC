@@ -28,7 +28,6 @@ import triton.language as tl
 from .codebook import LloydMaxCodebook
 from .rotation import generate_qjl_matrix, generate_rotation_matrix
 
-
 # ---------------------------------------------------------------------------
 # Kernel 1: Fused Quantize (rotate + quantize + residual + QJL sign)
 # ---------------------------------------------------------------------------

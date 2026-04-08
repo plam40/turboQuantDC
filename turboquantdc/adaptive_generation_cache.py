@@ -30,7 +30,6 @@ Duck-types the HuggingFace Cache protocol for drop-in use with model.generate().
 
 from __future__ import annotations
 
-import math
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
@@ -38,7 +37,6 @@ import torch
 from .adaptive_bits import ImportanceScorer
 from .codebook import LloydMaxCodebook
 from .rotation import apply_wht_rotation, generate_rotation_matrix, generate_wht_rotation
-
 
 # ---------------------------------------------------------------------------
 # Per-layer adaptive compressed storage

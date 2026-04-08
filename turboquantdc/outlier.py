@@ -21,7 +21,6 @@ discussion. Implementation based on TheTom/turboquant_plus outlier strategy.
 
 from __future__ import annotations
 
-import math
 from typing import Dict
 
 import torch

@@ -19,24 +19,16 @@ coding reclaims those wasted bits losslessly.
 
 from __future__ import annotations
 
-import math
-from collections import Counter
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
 
-from .codebook import LloydMaxCodebook, gaussian_pdf
 from .entropy_coding import (
     ANSEncoder,
-    EntropyEncoder,
-    ZlibEncoder,
-    _symbol_probabilities,
     measure_index_entropy,
-    theoretical_index_entropy,
 )
 from .polarquant import PolarQuant
-
 
 # ---------------------------------------------------------------------------
 # Core entropy measurement on real data

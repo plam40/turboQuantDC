@@ -32,14 +32,12 @@ Usage::
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import torch
-import torch.nn.functional as F
 
 from .codebook import LloydMaxCodebook
-from .rotation import generate_rotation_matrix, generate_wht_rotation, apply_wht_rotation
-
+from .rotation import generate_rotation_matrix
 
 # ---------------------------------------------------------------------------
 # Importance scorer

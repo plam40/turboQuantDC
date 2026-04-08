@@ -33,19 +33,16 @@ Duck-types the HuggingFace Cache protocol for drop-in use with
 from __future__ import annotations
 
 import math
-import os
-import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 
-from .codebook import LloydMaxCodebook
-from .rotation import apply_wht_rotation, generate_rotation_matrix, generate_wht_rotation
-from .learned_rotation import compute_pca_rotation
 from .adaptive_bits import ImportanceScorer
+from .codebook import LloydMaxCodebook
+from .learned_rotation import compute_pca_rotation
+from .rotation import apply_wht_rotation, generate_rotation_matrix, generate_wht_rotation
 
 try:
     import faiss

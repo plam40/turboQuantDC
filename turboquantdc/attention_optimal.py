@@ -29,12 +29,9 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
-from scipy import integrate, stats
 
-from .codebook import LloydMaxCodebook, gaussian_pdf, solve_lloyd_max
 from .polarquant import PolarQuant
 from .residual_quant import ResidualQuantEstimator
-
 
 # ---------------------------------------------------------------------------
 # Attention metrics

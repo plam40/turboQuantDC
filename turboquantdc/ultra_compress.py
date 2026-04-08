@@ -11,17 +11,14 @@ All approaches build on the existing PolarQuant/codebook infrastructure.
 
 from __future__ import annotations
 
-import math
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .codebook import LloydMaxCodebook, solve_lloyd_max
+from .codebook import LloydMaxCodebook
 from .polarquant import PolarQuant
-from .rotation import apply_wht_rotation, generate_wht_rotation
-
 
 # ---------------------------------------------------------------------------
 # Approach 1: Multi-Scale Residual Chain

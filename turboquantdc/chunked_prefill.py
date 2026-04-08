@@ -565,7 +565,6 @@ def build_needle_document(
 # ---------------------------------------------------------------------------
 def main():
     """Demo: chunked prefill with needle-in-a-haystack retrieval."""
-    import sys
 
     print("=" * 70)
     print("TurboQuantDC Chunked Prefill Demo")
@@ -577,16 +576,16 @@ def main():
     target_tokens = 32_000
     needle = "The secret project codename is BLUE-FALCON-42."
 
-    print(f"\nConfiguration:")
+    print("\nConfiguration:")
     print(f"  Model:       {model_name}")
     print(f"  Bits:        {bits} (mse_only=True)")
     print(f"  Chunk size:  {chunk_size}")
     print(f"  Target doc:  {target_tokens} tokens")
     print(f"  Needle:      '{needle}'")
-    print(f"  Depth:       25%")
+    print("  Depth:       25%")
 
     # 1. Load model
-    print(f"\n--- Loading model ---")
+    print("\n--- Loading model ---")
     engine = ChunkedPrefillEngine(
         model_name, bits=bits, chunk_size=chunk_size, mse_only=True,
     )
@@ -594,7 +593,7 @@ def main():
     print(f"  Model loaded in {engine._load_time:.1f}s")
 
     # 2. Build document with needle
-    print(f"\n--- Building document ---")
+    print("\n--- Building document ---")
     document = build_needle_document(
         needle_text=needle,
         target_tokens=target_tokens,
@@ -605,7 +604,7 @@ def main():
     print(f"  Document: {doc_tokens} tokens, {len(document)} chars")
 
     # 3. Prefill
-    print(f"\n--- Chunked prefill ---")
+    print("\n--- Chunked prefill ---")
 
     def progress(done, total, vram_gb):
         cached = engine.cache_seq_length
@@ -619,10 +618,10 @@ def main():
     print(f"  Total tokens processed: {total_tokens}")
 
     # 4. Generate answer
-    print(f"\n--- Generation (needle retrieval) ---")
+    print("\n--- Generation (needle retrieval) ---")
     question = "\n\nBased on the document above, what is the secret project codename? Answer concisely:\n"
     answer = engine.generate(question, max_new_tokens=50, temperature=0.0)
-    print(f"  Question: What is the secret project codename?")
+    print("  Question: What is the secret project codename?")
     print(f"  Answer:   {answer.strip()}")
 
     # 5. Check if needle was found
@@ -630,7 +629,7 @@ def main():
 
     # 6. Memory report
     report = engine.memory_report()
-    print(f"\n--- Memory report ---")
+    print("\n--- Memory report ---")
     print(f"  Total tokens:        {report['total_tokens']}")
     print(f"  Peak VRAM:           {report['peak_vram_gb']} GB")
     print(f"  KV cache (TQ-{bits}):  {report['kv_cache_mb']:.1f} MB")

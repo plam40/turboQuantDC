@@ -21,14 +21,12 @@ Reference: information-theoretic optimal transform coding (Karhunen-Loeve).
 
 from __future__ import annotations
 
-import math
-from typing import Dict, Optional, Tuple
+from typing import Dict, Tuple
 
 import torch
 import torch.nn as nn
 
 from .codebook import LloydMaxCodebook
-
 
 # ---------------------------------------------------------------------------
 # PCA / whitening rotation
