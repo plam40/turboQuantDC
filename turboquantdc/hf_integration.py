@@ -41,7 +41,6 @@ import torch
 from .estimator import TurboQuantEstimator
 from .polarquant import PolarQuant
 
-
 # ---------------------------------------------------------------------------
 # Utility: strip HF-injected internal attributes from parameter dicts
 # ---------------------------------------------------------------------------
@@ -514,10 +513,13 @@ class TurboQuantCache:
         dead positions.  The offset is tracked per-layer via
         ``TurboQuantLayer._kv_offset``.
         """
+        if isinstance(cache_position, int):
+            query_length = cache_position
+        else:
+            query_length = cache_position.shape[0]
         if layer_idx >= len(self._layers):
-            return cache_position.shape[0], 0
+            return query_length, 0
         layer = self._layers[layer_idx]
-        query_length = cache_position.shape[0]
         kv_length = layer.get_seq_length() + query_length + layer._kv_offset
         return kv_length, layer._kv_offset
 
