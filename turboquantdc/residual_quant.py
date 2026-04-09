@@ -30,7 +30,7 @@ Storage is identical to TurboQuant at the same bit-width:
 
 from __future__ import annotations
 
-from typing import Dict
+from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -63,6 +63,10 @@ class ResidualQuantEstimator(nn.Module):
             quantization. The mean is stored as FP16 (2 bytes per head,
             negligible overhead) and added back during dequantization.
             Default: True.
+        rotation_type: Rotation strategy to use. Options:
+            - ``None`` / ``"wht"`` / ``"qr"`` -- forwarded to PolarQuant
+            - ``"givens"`` -- 2D block-diagonal Givens rotations (O(d))
+            - ``"quaternion"`` -- 4D block-diagonal quaternion rotations (O(d))
     """
 
     def __init__(
@@ -72,17 +76,47 @@ class ResidualQuantEstimator(nn.Module):
         seed: int = 42,
         device: str | torch.device = "cpu",
         center_before_quantize: bool = True,
+        rotation_type: Optional[str] = None,
     ):
         super().__init__()
         self.d = d
         self.bits = bits
         self.center_before_quantize = center_before_quantize
+        self.rotation_type = rotation_type
 
         # Bit budget: (bits-1) for MSE, 1 for residual signs
         self.mse_bits = max(bits - 1, 1)
 
-        # Stage 1: PolarQuant with mse_bits (same as TurboQuant)
-        self.polar = PolarQuant(d, self.mse_bits, seed=seed, device=device)
+        # Block-diagonal rotations: we create our own rotation module and
+        # tell PolarQuant to skip its rotation (use "qr" but we override).
+        self._block_rotation = None
+        if rotation_type in ("givens", "quaternion"):
+            from .block_rotation import GivensRotation, QuaternionRotation
+            if rotation_type == "givens":
+                self._block_rotation = GivensRotation(d, seed=seed, device=device)
+            else:
+                self._block_rotation = QuaternionRotation(d, seed=seed, device=device)
+            # PolarQuant still needed for codebook -- use its default rotation
+            # but we will call our own rotate/unrotate instead
+            self.polar = PolarQuant(d, self.mse_bits, seed=seed, device=device)
+        else:
+            # Standard PolarQuant with WHT or QR rotation
+            self.polar = PolarQuant(
+                d, self.mse_bits, seed=seed, device=device,
+                rotation_type=rotation_type,
+            )
+
+    def _rotate(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply forward rotation (delegates to block rotation if configured)."""
+        if self._block_rotation is not None:
+            return self._block_rotation.rotate(x)
+        return self.polar.rotate(x)
+
+    def _unrotate(self, y: torch.Tensor) -> torch.Tensor:
+        """Apply inverse rotation (delegates to block rotation if configured)."""
+        if self._block_rotation is not None:
+            return self._block_rotation.unrotate(y)
+        return self.polar.unrotate(y)
 
     def quantize(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
         """Compress a vector using MSE + direct residual signs.
@@ -127,7 +161,7 @@ class ResidualQuantEstimator(nn.Module):
         x_normalized = x_centered / (vec_norm + 1e-8)  # (batch, d)
 
         # Rotate to the space where Lloyd-Max quantization happens
-        x_rotated = self.polar.rotate(x_normalized)  # (batch, d)
+        x_rotated = self._rotate(x_normalized)  # (batch, d)
 
         # Stage 1: MSE quantization in rotated space
         mse_indices = self.polar.codebook.quantize(x_rotated)  # (batch, d)
@@ -197,7 +231,7 @@ class ResidualQuantEstimator(nn.Module):
         x_corrected_rotated = x_mse_rotated + correction  # (batch, d)
 
         # Unrotate back to original space
-        x_corrected = self.polar.unrotate(x_corrected_rotated)  # (batch, d)
+        x_corrected = self._unrotate(x_corrected_rotated)  # (batch, d)
 
         # Rescale by original norm and add mean back
         result = x_corrected * vec_norm.unsqueeze(-1) + vec_mean
@@ -218,7 +252,9 @@ class ResidualQuantEstimator(nn.Module):
         Returns:
             Reconstructed vectors of shape (batch, d) or (d,).
         """
-        x_mse = self.polar.dequantize(compressed["mse_indices"])
+        # Centroid lookup + unrotate (use our rotation, not PolarQuant's)
+        y_hat = self.polar.centroids[compressed["mse_indices"]]
+        x_mse = self._unrotate(y_hat)
         vec_norm = compressed["vec_norm"]
         vec_mean = compressed["vec_mean"]
 
@@ -275,12 +311,20 @@ class ResidualQuantLayer:
         seed: Random seed for rotation matrices.
         center_before_quantize: Subtract per-head key mean before quantization.
             Exploits softmax shift-invariance for FREE +1 bit of precision.
+        rotation_type: Rotation strategy (None, "wht", "qr", "givens", "quaternion").
     """
 
-    def __init__(self, bits: int = 3, seed: int = 42, center_before_quantize: bool = True):
+    def __init__(
+        self,
+        bits: int = 3,
+        seed: int = 42,
+        center_before_quantize: bool = True,
+        rotation_type: Optional[str] = None,
+    ):
         self.bits = bits
         self.seed = seed
         self.center_before_quantize = center_before_quantize
+        self.rotation_type = rotation_type
         self._seq_len: int = 0
 
         # Lazily initialized
@@ -316,6 +360,7 @@ class ResidualQuantLayer:
         self._key_rq = ResidualQuantEstimator(
             d=d, bits=self.bits, seed=self.seed, device=device,
             center_before_quantize=False,  # We handle centering at the layer level
+            rotation_type=self.rotation_type,
         )
         self._val_pq = PolarQuant(
             d=d, bits=self.bits, seed=self.seed + 100, device=device,
@@ -458,12 +503,19 @@ class ResidualQuantCache:
 
     is_compileable = False
 
-    def __init__(self, bits: int = 3, seed: int = 42, center_before_quantize: bool = True):
+    def __init__(
+        self,
+        bits: int = 3,
+        seed: int = 42,
+        center_before_quantize: bool = True,
+        rotation_type: Optional[str] = None,
+    ):
         if not (2 <= bits <= 8):
             raise ValueError(f"bits must be between 2 and 8, got {bits}")
         self.bits = bits
         self.seed = seed
         self.center_before_quantize = center_before_quantize
+        self.rotation_type = rotation_type
         self._layers: list[ResidualQuantLayer] = []
 
     def update(
@@ -478,6 +530,7 @@ class ResidualQuantCache:
             self._layers.append(ResidualQuantLayer(
                 bits=self.bits, seed=self.seed + len(self._layers),
                 center_before_quantize=self.center_before_quantize,
+                rotation_type=self.rotation_type,
             ))
         return self._layers[layer_idx].update(key_states, value_states)
 

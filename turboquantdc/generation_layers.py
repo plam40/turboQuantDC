@@ -2,6 +2,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple
 import torch
 
+from .block_rotation import GivensRotation, QuaternionRotation
 from .codebook import LloydMaxCodebook
 from .rotation import apply_wht_rotation, generate_qjl_matrix, generate_rotation_matrix, generate_wht_rotation
 
@@ -139,7 +140,18 @@ class _CompressedLayer:
         else:
             self._rotation_type = "wht" if is_pow2 else "qr"
 
-        if self._rotation_type == "wht":
+        # Block-diagonal rotation module (for "givens" / "quaternion")
+        self._block_rotation = None
+
+        if self._rotation_type == "givens":
+            self._block_rotation = GivensRotation(d, seed=self.seed, device=device)
+            self._rotation = None
+            self._wht_params = None
+        elif self._rotation_type == "quaternion":
+            self._block_rotation = QuaternionRotation(d, seed=self.seed, device=device)
+            self._rotation = None
+            self._wht_params = None
+        elif self._rotation_type == "wht":
             if not is_pow2:
                 raise ValueError(
                     f"WHT rotation requires d to be a power of 2, got d={d}. "
@@ -212,8 +224,10 @@ class _CompressedLayer:
         norms = flat.norm(dim=-1, keepdim=True)
         normalized = flat / (norms + 1e-8)
 
-        # Rotate (WHT: O(d log d); QR: O(d^2))
-        if self._rotation_type == "wht":
+        # Rotate (WHT: O(d log d); QR: O(d^2); block: O(d))
+        if self._block_rotation is not None:
+            rotated = self._block_rotation.rotate(normalized)
+        elif self._rotation_type == "wht":
             rotated = apply_wht_rotation(normalized, self._wht_params)
         else:
             rotated = normalized @ self._rotation
@@ -224,7 +238,9 @@ class _CompressedLayer:
 
         # Norm correction: store ratio to compensate reconstruction norm drift
         recon_rotated = codebook.centroids[indices]
-        if self._rotation_type == "wht":
+        if self._block_rotation is not None:
+            recon_unrotated = self._block_rotation.unrotate(recon_rotated)
+        elif self._rotation_type == "wht":
             recon_unrotated = apply_wht_rotation(recon_rotated, self._wht_params, inverse=True)
         else:
             recon_unrotated = recon_rotated @ self._rotation.T
@@ -373,8 +389,10 @@ class _CompressedLayer:
                 + res_signs.reshape(-1, d) * res_scale.reshape(-1, 1)
             )
 
-        # Unrotate and rescale (WHT: O(d log d); QR: O(d^2))
-        if self._rotation_type == "wht":
+        # Unrotate and rescale (WHT: O(d log d); QR: O(d^2); block: O(d))
+        if self._block_rotation is not None:
+            reconstructed = self._block_rotation.unrotate(reconstructed)
+        elif self._rotation_type == "wht":
             reconstructed = apply_wht_rotation(reconstructed, self._wht_params, inverse=True)
         else:
             reconstructed = reconstructed @ self._rotation.T
@@ -711,7 +729,9 @@ class _CompressedLayer:
             )
 
         # Unrotate in float32 (avoids FP16 intermediate)
-        if self._rotation_type == "wht":
+        if self._block_rotation is not None:
+            reconstructed = self._block_rotation.unrotate(reconstructed.float())
+        elif self._rotation_type == "wht":
             reconstructed = apply_wht_rotation(
                 reconstructed.float(), self._wht_params, inverse=True
             )
