@@ -73,6 +73,9 @@ from .outlier import OutlierTurboQuant
 from .polarquant import PolarQuant
 from .qjl import QJL
 
+# Block-diagonal rotations (Givens/Quaternion)
+from .block_rotation import GivensRotation, QuaternionRotation
+
 # Phase 5: Beyond the Paper -- core extensions (torch-only)
 from .rotation import (
     apply_wht_rotation,
@@ -112,6 +115,7 @@ from .entropy_coding import (
     measure_index_entropy,
     theoretical_index_entropy,
 )
+from .learned_quant import LearnedQuantizer, calibrate_all_layers
 from .learned_rotation import PCARotatedQuantizer, compute_pca_rotation
 
 # ---------------------------------------------------------------------------
@@ -375,9 +379,15 @@ __all__ = [
     "AttentionGatedCache",
     # v0.3.0: Mean-Removed Quantization
     "MeanRemovedQuantizer",
+    # v0.3.0: Learned (differentiable attention-optimal) Quantization
+    "LearnedQuantizer",
+    "calibrate_all_layers",
     # v0.3.0: Retrieval Cache (requires faiss-gpu)
     "RetrievalKVCache",
     "PCACodeIndex",
+    # Block-diagonal rotations
+    "GivensRotation",
+    "QuaternionRotation",
     # Triton Kernels (optional)
     "TritonTurboQuant",
     "triton_wht_rotate",
