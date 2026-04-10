@@ -1,86 +1,91 @@
 # TurboQuantDC — Session Handoff (April 2-9, 2026)
 
-## What This Is
-From-scratch PyTorch implementation of Google's TurboQuant (ICLR 2026) for KV cache compression, extended with 7 novel research breakthroughs. 108 commits, 662+ tests, MIT license.
+## Critical: Tom's Review Needs Response
 
-**Live showcase:** https://dhawalc.github.io/turboQuantDC/
-**Repo:** https://github.com/dhawalc/turboQuantDC
-**PR to llama.cpp:** https://github.com/TheTom/llama-cpp-turboquant/pull/45#issuecomment-4181916947
+Tom (@no_stp_on_snek) reviewed our work and raised 6 valid points. Reply drafted at `~/Downloads/TOM_REPLY.md`. Key actions before tweeting anything else:
 
-## Current State: v0.3.0
+1. **Run PPL on Qwen2.5-7B and Llama 3.1 8B** vs production WHT (Tom's ask)
+2. **Run NIAH at 32K** at start/mid/end positions (Tom's ask)
+3. **Correct the baseline comparison** — our "+89% over WHT" was vs internal pipeline, not production TQ+
+4. **Mark mean-removal as 3-bit-symmetric only** — hurts at 4-bit with block rotations
 
-### What Works (Ship-Ready)
-- **GenerationCache** — Production KV cache with mean-removal, ResidualQuant, boundary anchors, FP16 hot window. Validated 3B-72B. Coherent generation, <1% PPL cost.
-- **Mean-removal** — Integrated into production. One line: `keys -= keys.mean()`. 3-bit beats 4-bit quality.
-- **ResidualQuant** — Beats QJL by 19% on attention match. Tom (TurboQuant author) confirmed.
-- **PCA-adaptive rotation** — 13x lower MSE than WHT. 100% top-5 at 3-bit. Calibrate 128 tokens, transfers across prompts.
-- **CUDA kernels** — 29x faster dequantize at d=256. WHT extended to d=2048.
-- **DeltaQuant** — 6.1x at identical 3-bit quality via cross-token delta coding.
-- **Adaptive bits** — Power-law exploitation: top 10% tokens get 80% attention. 7.8x near-lossless.
-- **Entropy coding** — 6% free lossless via ANS on top of quantization.
-- **pip install turboquantdc[all]** — Builds clean, 107 exports.
-- **llama.cpp PR** — `GGML_TYPE_RQ3_0 = 46` on branch `feat/residualquant-rq3` in `/home/dhawal/tom-llama-cpp`. CPU-only, compiles with CUDA. Ready to submit.
+## What's Real (Adversarial Validated)
 
-### What's Experimental (Bugs to Fix)
-- **TurboQuantV2Cache** (`v2_cache.py`) — Garbled output. PCA whitening amplifies noise in low-variance dimensions. Fix: clamp whitening scale, sync running mean.
-- **TurboRetrievalCache** (`turbo_retrieval_cache.py`) — Works at 1.5K (needle found). Fails at 3K+ (FAISS undertrained, sliding-window prefill loses distant tokens). Fix: full-attention prefill, better nlist scaling, dtype optimization (int64→int8 for indices = 8x RAM savings).
+| Technique | Claim | Validated? | Honest Number |
+|-----------|-------|------------|---------------|
+| WHT + mean-removal 3-bit | 0.985-0.998 cosine | YES (std<0.001, 3B+14B, 5 prompts, 3 seeds) | Ship it |
+| Mean-removal | Never hurts | YES at 3-bit symmetric | 3-bit symmetric ONLY, hurts at 4-bit+block |
+| Cayley learned rotation | 0.974 cosine | INFLATED (layer 0 anomaly) | +0.002-0.006 on typical layers |
+| Expected Attention | 10x at 0.978 | OVERSTATED | Spearman 0.37 real data, BREAKS on topic shift |
+| Triple stack | 59.8x at 0.90 | OVERSTATED | 20-40x at ~0.89 honestly |
+| KVSculpt distillation | 0.999 pre-quant | REAL | Distillation itself is near-lossless |
+| Block rotation + mean | Beats RotorQuant 16.6% | MISLEADING | Beats on attention cosine proxy, not PPL |
 
-### Research Findings (Publishable)
-1. **Asymptotic compression law** — Gini 0.60→0.85 (128→2K tokens). Min bits/token = O(1/n). Longer context = better compression.
-2. **Mean-removal free bit** — 57% of key variance is invisible to softmax.
-3. **PCA enables both compression AND retrieval** — WHT can't. Dual-mode PCA.
-4. **ResidualQuant > QJL** — Lower variance beats unbiasedness for autoregressive generation.
-5. **Infrastructure > algorithm** — Boundary + hot window worth 40 PPL points; algorithm choice worth 1.
+## What's Broken (Must Fix)
 
-### Dead Ends (Proven Negative Results)
-- Cross-head delta: GQA kills correlation (cosine=0.12)
-- Cross-layer prediction: layers independent (deltas 2.6x larger)
-- Temporal delta: error accumulation O(sqrt(T))
-- Spectral/DCT: flat energy spectrum
-- Sign prediction: WHT decorrelation is complete
+1. **Expected Attention on topic shifts**: Spearman -0.035 (ANTI-correlated). Needs shift-detection guard.
+2. **TurboRetrievalCache > 2K tokens**: FAISS undertrained, sliding-window loses distant tokens. Fix: full-attention prefill, dtype optimization (int64→int8).
+3. **V2Cache**: PCA whitening amplifies noise. Fix: clamp low-variance dimensions.
+4. **Layer 0**: Always needs FP16 anchor. No quantization scheme works well on it.
 
-## Benchmark Headlines
+## Immediate Next Actions (Priority Order)
 
-| Model | Context Extension | Speed | Key Result |
-|-------|-------------------|-------|------------|
-| Gemma 4 26B MoE | 196K→262K (full native) | 150 tok/s | FP16 OOMs, turbo3 runs |
-| Gemma 4 E4B | — | — | 0.999994 cosine, 100% top-5 |
-| Gemma 3 27B | 49K→115K (2.3x) | 44 tok/s | Zero speed degradation |
-| Llama 3.1 70B | 4K→16K (4x) | 2.8 tok/s | FP16 OOMs at 8K |
-| Llama 3.1 8B | 48K→100K (2.1x) | 86 tok/s | turbo3 FASTER than FP16 |
-| Qwen 2.5 72B | — | — | 100% top-1, 100% top-5 |
-| Perplexity (8B) | — | — | +0.67% PPL (turbo3 vs FP16) |
+1. **Reply to Tom** — post the reply from ~/Downloads/TOM_REPLY.md
+2. **Run PPL benchmark** — Qwen2.5-7B + Llama 3.1 8B, WHT+mean-removal vs production WHT, wikitext-2 perplexity
+3. **Run NIAH at 32K** — start/mid/end positions, with our GenerationCache
+4. **Prep mean-removal patch for Tom** — one-liner he can test on Metal/Pascal
+5. **Update GitHub Pages** — correct overstated claims
+6. **Update tweets** — qualify the RotorQuant comparison
+
+## What to Ship (v0.3.1)
+
+- WHT + mean-removal as new default (proven)
+- Block rotation as optional (`rotation_type="givens"`)
+- Cayley as optional calibration (frame as "modest per-layer improvement")
+- Expected Attention with shift-detection guard
+- KVSculpt distillation (standalone, not in generation pipeline yet)
+- Fix get_mask_sizes for transformers 5.5+
+
+## What NOT to Ship Yet
+
+- TurboRetrievalCache (broken > 2K)
+- V2Cache (PCA whitening bug)
+- Triple stack as "60x" (needs honest framing)
+- Any "beats RotorQuant" claim without PPL backing
+
+## Codebase State
+
+- **120+ commits**, 662+ tests, v0.3.0 on PyPI (needs bump to 0.3.1)
+- GitHub Pages live: https://dhawalc.github.io/turboQuantDC/
+- llama.cpp PR ready: feat/residualquant-rq3 on /home/dhawal/tom-llama-cpp
+- PR #45 comment posted: https://github.com/TheTom/llama-cpp-turboquant/pull/45
 
 ## Key Files
 
-| File | What |
-|------|------|
-| `turboquantdc/generation_cache.py` | Re-export wrapper (split into 4 modules) |
-| `turboquantdc/generation_core.py` | Production GenerationCache |
-| `turboquantdc/generation_layers.py` | _CompressedLayer, _FP16Layer |
-| `turboquantdc/residual_quant.py` | ResidualQuant (with mean-removal) |
-| `turboquantdc/learned_rotation.py` | PCA rotation |
-| `turboquantdc/delta_quant.py` | DeltaQuant cross-token coding |
-| `turboquantdc/adaptive_bits.py` | Importance scoring + adaptive tiers |
-| `turboquantdc/retrieval_cache.py` | FAISS index wrapper |
-| `turboquantdc/turbo_retrieval_cache.py` | TurboRetrievalCache (experimental) |
-| `turboquantdc/v2_cache.py` | Unified V2 (experimental, has bug) |
-| `turboquantdc/cuda/dequantize.cu` | Raw CUDA dequantize kernel |
-| `turboquantdc/cuda/wht.cu` | CUDA WHT to d=2048 |
-| `tools/residualquant_reference.c` | C99 reference for llama.cpp PR |
-| `docs/RESIDUALQUANT_LLAMA_CPP_SPEC.md` | GGML_TYPE_RQ3_0 spec |
-| `docs/RESEARCH_LANDSCAPE.md` | 40-paper competitive analysis |
-| `visualization/index.html` | GitHub Pages (deployed) |
+| File | What | Status |
+|------|------|--------|
+| turboquantdc/generation_core.py | Production GenerationCache | STABLE, ship |
+| turboquantdc/residual_quant.py | ResidualQuant + mean-removal | STABLE, ship |
+| turboquantdc/block_rotation.py | Givens/Quaternion rotation | STABLE, optional |
+| turboquantdc/cayley_quant.py | Learned full rotation | EXPERIMENTAL |
+| turboquantdc/expected_attention.py | EA pruning | NEEDS shift guard |
+| turboquantdc/cache_distillation.py | KVSculpt | STANDALONE only |
+| turboquantdc/turbo_retrieval_cache.py | FAISS + compressed KV | BROKEN > 2K |
+| turboquantdc/v2_cache.py | Unified V2 | BROKEN (whitening bug) |
+| benchmarks/adversarial_validation.py | Honest validation | REFERENCE |
+| ~/Downloads/TOM_REPLY.md | Reply to Tom | POST THIS |
 
-## Immediate Next Steps
+## Research Dead Ends (Published)
 
-1. **Benchmark Qwen 3.5 35B MoE at 262K** — 2 KV heads, lightest KV cache of any large model
-2. **Fix TurboRetrievalCache** — dtype optimization + full-attention prefill
-3. **Fix V2Cache** — clamp PCA whitening scale
-4. **Submit llama.cpp PR** to Tom's repo
-5. **Enter Gemma 4 Good Hackathon** — $200K prize pool, deadline May 18
+Cross-head delta (GQA kills it), cross-layer prediction (independent layers), temporal delta (error accumulation), spectral/DCT (flat energy), XQuant rematerialization (worse for GQA), sign prediction (WHT decorrelation complete).
 
-## External Validation
-- Tom Turney (@no_stp_on_snek): "we killed QJL early for the same reason. the stacking numbers speak for themselves."
-- PR #45 comment posted with full RTX 4090 benchmark data
-- GitHub Pages live: https://dhawalc.github.io/turboQuantDC/
+## The Real Moat
+
+After adversarial validation, the defensible innovations are:
+1. **Mean-removal** — one line, proven across models/prompts/seeds at 3-bit
+2. **Asymptotic compression law** — Gini increases with context, publishable finding
+3. **KVSculpt distillation** — near-lossless token synthesis, novel combination
+4. **Expected Attention** — works when attention is stable (needs guard for shifts)
+5. **Comprehensive benchmark data** — 20+ experiments, honest dead ends published
+
+The "60x compression" and "beats RotorQuant" claims need correction. The mean-removal insight and the honest science are what build real credibility with Tom and the community.
