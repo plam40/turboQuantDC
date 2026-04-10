@@ -1,0 +1,56 @@
+{
+  "Qwen/Qwen2.5-7B-Instruct": {
+    "FP16 baseline": {
+      "ppl": 7.5225,
+      "tokens": 4095,
+      "time_sec": 3.2
+    },
+    "WHT 3-bit": {
+      "ppl": 9410.4876,
+      "tokens": 4095,
+      "time_sec": 20.2
+    },
+    "WHT 3-bit + mean-removal": {
+      "ppl": 7.9029,
+      "tokens": 4095,
+      "time_sec": 23.0
+    },
+    "WHT 4-bit": {
+      "ppl": 1048.9915,
+      "tokens": 4095,
+      "time_sec": 32.5
+    },
+    "WHT 4-bit + mean-removal": {
+      "ppl": 7.7583,
+      "tokens": 4095,
+      "time_sec": 30.5
+    }
+  },
+  "Qwen/Qwen2.5-3B-Instruct": {
+    "FP16 baseline": {
+      "ppl": 10.7177,
+      "tokens": 4095,
+      "time_sec": 2.5
+    },
+    "WHT 3-bit": {
+      "ppl": 60.1999,
+      "tokens": 4095,
+      "time_sec": 25.6
+    },
+    "WHT 3-bit + mean-removal": {
+      "ppl": 11.0165,
+      "tokens": 4095,
+      "time_sec": 23.6
+    },
+    "WHT 4-bit": {
+      "ppl": 13.2231,
+      "tokens": 4095,
+      "time_sec": 36.1
+    },
+    "WHT 4-bit + mean-removal": {
+      "ppl": 10.8273,
+      "tokens": 4095,
+      "time_sec": 35.5
+    }
+  }
+}

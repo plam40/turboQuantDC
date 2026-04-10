@@ -1,0 +1,74 @@
+[
+  {
+    "config": "FP16 baseline",
+    "needle_position": 0.1,
+    "context_tokens": 8022,
+    "pass": true,
+    "generated": "PINEAPPLE-77",
+    "time_sec": 1.8
+  },
+  {
+    "config": "WHT 3-bit",
+    "needle_position": 0.1,
+    "context_tokens": 8022,
+    "pass": false,
+    "generated": "0000., .  numberWith); .0..0.. I.. The0 the, .,.",
+    "time_sec": 5.7
+  },
+  {
+    "config": "WHT 3-bit + mean-removal",
+    "needle_position": 0.1,
+    "context_tokens": 8022,
+    "pass": true,
+    "generated": "PINEAPPLE-77",
+    "time_sec": 2.7
+  },
+  {
+    "config": "FP16 baseline",
+    "needle_position": 0.5,
+    "context_tokens": 8022,
+    "pass": true,
+    "generated": "PINEAPPLE-77",
+    "time_sec": 1.7
+  },
+  {
+    "config": "WHT 3-bit",
+    "needle_position": 0.5,
+    "context_tokens": 8022,
+    "pass": false,
+    "generated": "001 9111 2 mathematics 9 of mathematics 0. 1.  (1 10 mathematics of",
+    "time_sec": 5.2
+  },
+  {
+    "config": "WHT 3-bit + mean-removal",
+    "needle_position": 0.5,
+    "context_tokens": 8022,
+    "pass": true,
+    "generated": "PINEAPPLE-77",
+    "time_sec": 2.9
+  },
+  {
+    "config": "FP16 baseline",
+    "needle_position": 0.9,
+    "context_tokens": 8022,
+    "pass": true,
+    "generated": "PINEAPPLE-77",
+    "time_sec": 1.2
+  },
+  {
+    "config": "WHT 3-bit",
+    "needle_position": 0.9,
+    "context_tokens": 8022,
+    "pass": false,
+    "generated": "1 0 0000000 strugg0 mathematics. 00.52 1.0.0, .",
+    "time_sec": 5.6
+  },
+  {
+    "config": "WHT 3-bit + mean-removal",
+    "needle_position": 0.9,
+    "context_tokens": 8022,
+    "pass": true,
+    "generated": "PINEAPPLE-77",
+    "time_sec": 3.1
+  }
+]
