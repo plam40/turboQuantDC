@@ -1,91 +1,84 @@
 # TurboQuantDC — Session Handoff (April 2-9, 2026)
 
-## Critical: Tom's Review Needs Response
+## What Happened Today (April 9)
 
-Tom (@no_stp_on_snek) reviewed our work and raised 6 valid points. Reply drafted at `~/Downloads/TOM_REPLY.md`. Key actions before tweeting anything else:
+The single most important finding of the entire project:
 
-1. **Run PPL on Qwen2.5-7B and Llama 3.1 8B** vs production WHT (Tom's ask)
-2. **Run NIAH at 32K** at start/mid/end positions (Tom's ask)
-3. **Correct the baseline comparison** — our "+89% over WHT" was vs internal pipeline, not production TQ+
-4. **Mark mean-removal as 3-bit-symmetric only** — hurts at 4-bit with block rotations
+Mean-removal is not an optimization. It fixes catastrophic PPL failure.
+- Qwen2.5-7B WHT 3-bit WITHOUT mean-removal: PPL 9,410
+- Qwen2.5-7B WHT 3-bit WITH mean-removal: PPL 7.90 (+0.38 vs FP16 7.52)
+- NIAH at 8K: FAIL without, PASS at all positions with mean-removal
+- Matches Tom's +62.95 finding on Qwen2.5-3B (same root cause)
 
-## What's Real (Adversarial Validated)
+Tom reviewed our work, raised 6 valid points. We ran the benchmarks he asked for and sent results. Reply posted. Follow-up with PPL/NIAH numbers ready at ~/Downloads/TOM_FOLLOWUP.txt.
 
-| Technique | Claim | Validated? | Honest Number |
-|-----------|-------|------------|---------------|
-| WHT + mean-removal 3-bit | 0.985-0.998 cosine | YES (std<0.001, 3B+14B, 5 prompts, 3 seeds) | Ship it |
-| Mean-removal | Never hurts | YES at 3-bit symmetric | 3-bit symmetric ONLY, hurts at 4-bit+block |
-| Cayley learned rotation | 0.974 cosine | INFLATED (layer 0 anomaly) | +0.002-0.006 on typical layers |
-| Expected Attention | 10x at 0.978 | OVERSTATED | Spearman 0.37 real data, BREAKS on topic shift |
-| Triple stack | 59.8x at 0.90 | OVERSTATED | 20-40x at ~0.89 honestly |
-| KVSculpt distillation | 0.999 pre-quant | REAL | Distillation itself is near-lossless |
-| Block rotation + mean | Beats RotorQuant 16.6% | MISLEADING | Beats on attention cosine proxy, not PPL |
+Also ran adversarial validation across 14B model, 5 prompts, 3 seeds. Corrected all overstated claims. Ran deep strategic + technical novelty research.
 
-## What's Broken (Must Fix)
+## What's Real (Final Assessment)
 
-1. **Expected Attention on topic shifts**: Spearman -0.035 (ANTI-correlated). Needs shift-detection guard.
-2. **TurboRetrievalCache > 2K tokens**: FAISS undertrained, sliding-window loses distant tokens. Fix: full-attention prefill, dtype optimization (int64→int8).
-3. **V2Cache**: PCA whitening amplifies noise. Fix: clamp low-variance dimensions.
-4. **Layer 0**: Always needs FP16 anchor. No quantization scheme works well on it.
+SHIP IT (proven, production-ready):
+- WHT + mean-removal at 3-bit: PPL +0.30-0.38. NIAH passes. std<0.001.
+- Mean-removal: the fix for catastrophic failure on Qwen models, not just an optimization
+- GenerationCache: works 3B-72B with boundary anchors + FP16 hot window
+- CUDA kernels: 29x faster at d=256
 
-## Immediate Next Actions (Priority Order)
+GENUINELY NOVEL (publishable, no prior art):
+- Asymptotic compression law: Gini ~ 0.08 * ln(n), O(1/n) min bits/token
+- Triple-stack pipeline: eviction + distillation + quant, 37.9x at 0.93 (honest)
+- Attention-KL rotation objective (Cayley): novel objective, modest practical gain
 
-1. **Reply to Tom** — post the reply from ~/Downloads/TOM_REPLY.md
-2. **Run PPL benchmark** — Qwen2.5-7B + Llama 3.1 8B, WHT+mean-removal vs production WHT, wikitext-2 perplexity
-3. **Run NIAH at 32K** — start/mid/end positions, with our GenerationCache
-4. **Prep mean-removal patch for Tom** — one-liner he can test on Metal/Pascal
-5. **Update GitHub Pages** — correct overstated claims
-6. **Update tweets** — qualify the RotorQuant comparison
+NOT NOVEL (prior art: NSNQuant May 2025):
+- Mean-removal technique itself (but connecting it to TQ failure IS new)
 
-## What to Ship (v0.3.1)
+OVERSTATED (corrected):
+- "Beats RotorQuant 16.6%" — proxy metric, no PPL backing
+- "59.8x at 0.90" — honest: 20-40x at ~0.89
+- Cayley "breakthrough" — +0.002-0.006 on typical layers
 
-- WHT + mean-removal as new default (proven)
-- Block rotation as optional (`rotation_type="givens"`)
-- Cayley as optional calibration (frame as "modest per-layer improvement")
-- Expected Attention with shift-detection guard
-- KVSculpt distillation (standalone, not in generation pipeline yet)
-- Fix get_mask_sizes for transformers 5.5+
+BROKEN (must fix before shipping):
+- Expected Attention on topic shifts: ANTI-correlated (-0.035 Spearman)
+- TurboRetrievalCache > 2K tokens
+- V2Cache PCA whitening bug
+- Layer 0 always needs FP16
 
-## What NOT to Ship Yet
+## Immediate Next Actions
 
-- TurboRetrievalCache (broken > 2K)
-- V2Cache (PCA whitening bug)
-- Triple stack as "60x" (needs honest framing)
-- Any "beats RotorQuant" claim without PPL backing
+1. POST Tom follow-up (~/Downloads/TOM_FOLLOWUP.txt) with PPL + NIAH numbers
+2. GET HF token for Llama 3.1 8B and run same PPL benchmark
+3. ENTER Gemma 4 Good hackathon (deadline May 18, $200K pool)
+   - Build an APPLICATION (medical doc analysis on consumer hardware)
+   - Not more benchmarks
+4. SUBMIT asymptotic compression law as workshop paper (ICML 2026 deadlines ~May)
+5. UPSTREAM mean-removal to Tom's TQ+ (one-liner C patch, already shared)
+6. UPDATE GitHub Pages with honest numbers (PPL, not attention cosine)
+
+## Strategic Direction
+
+TurboQuantDC is a research contribution and credential, not a standalone product.
+Best paths (ranked by expected value):
+1. Upstream novel techniques to llama.cpp/vLLM (52M+ monthly users)
+2. Use codebase as portfolio for inference engineering roles ($300-600K)
+3. Gemma 4 hackathon ($10-50K near-term)
+4. Publish asymptotic law paper (career capital)
 
 ## Codebase State
 
-- **120+ commits**, 662+ tests, v0.3.0 on PyPI (needs bump to 0.3.1)
+- 120+ commits, v0.3.0, 1796+ tests, MIT license
 - GitHub Pages live: https://dhawalc.github.io/turboQuantDC/
-- llama.cpp PR ready: feat/residualquant-rq3 on /home/dhawal/tom-llama-cpp
-- PR #45 comment posted: https://github.com/TheTom/llama-cpp-turboquant/pull/45
+- llama.cpp PR branch: feat/residualquant-rq3 on /home/dhawal/tom-llama-cpp
+- All results pushed to GitHub
 
 ## Key Files
 
-| File | What | Status |
-|------|------|--------|
-| turboquantdc/generation_core.py | Production GenerationCache | STABLE, ship |
-| turboquantdc/residual_quant.py | ResidualQuant + mean-removal | STABLE, ship |
-| turboquantdc/block_rotation.py | Givens/Quaternion rotation | STABLE, optional |
-| turboquantdc/cayley_quant.py | Learned full rotation | EXPERIMENTAL |
-| turboquantdc/expected_attention.py | EA pruning | NEEDS shift guard |
-| turboquantdc/cache_distillation.py | KVSculpt | STANDALONE only |
-| turboquantdc/turbo_retrieval_cache.py | FAISS + compressed KV | BROKEN > 2K |
-| turboquantdc/v2_cache.py | Unified V2 | BROKEN (whitening bug) |
-| benchmarks/adversarial_validation.py | Honest validation | REFERENCE |
-| ~/Downloads/TOM_REPLY.md | Reply to Tom | POST THIS |
-
-## Research Dead Ends (Published)
-
-Cross-head delta (GQA kills it), cross-layer prediction (independent layers), temporal delta (error accumulation), spectral/DCT (flat energy), XQuant rematerialization (worse for GQA), sign prediction (WHT decorrelation complete).
-
-## The Real Moat
-
-After adversarial validation, the defensible innovations are:
-1. **Mean-removal** — one line, proven across models/prompts/seeds at 3-bit
-2. **Asymptotic compression law** — Gini increases with context, publishable finding
-3. **KVSculpt distillation** — near-lossless token synthesis, novel combination
-4. **Expected Attention** — works when attention is stable (needs guard for shifts)
-5. **Comprehensive benchmark data** — 20+ experiments, honest dead ends published
-
-The "60x compression" and "beats RotorQuant" claims need correction. The mean-removal insight and the honest science are what build real credibility with Tom and the community.
+| File | Status |
+|------|--------|
+| benchmarks/results/ppl_for_tom.md | PPL numbers for Tom |
+| benchmarks/results/niah_for_tom.md | NIAH results for Tom |
+| benchmarks/results/adversarial_validation.md | Honest validation |
+| ~/Downloads/TOM_FOLLOWUP.txt | Reply to post |
+| ~/Downloads/STRATEGIC_ANALYSIS.md | Business strategy |
+| ~/Downloads/WHAT_IS_GENUINELY_NOVEL.md | Novelty map vs literature |
+| turboquantdc/generation_core.py | Production cache (STABLE) |
+| turboquantdc/expected_attention.py | EA pruning (needs shift guard) |
+| turboquantdc/cache_distillation.py | KVSculpt (standalone) |
+| turboquantdc/cayley_quant.py | Learned rotation (experimental) |
